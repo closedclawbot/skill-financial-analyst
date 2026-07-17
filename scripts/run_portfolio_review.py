@@ -19,7 +19,7 @@ Usage:
     python scripts/run_portfolio_review.py --file portfolio.csv
     python scripts/run_portfolio_review.py --file portfolio.csv --output review.json
 """
-import os, sys, json, csv, argparse, time
+import os, sys, json, csv, argparse, time, math
 from datetime import datetime
 
 _project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -35,6 +35,33 @@ from scripts.sector_rotation import (
     get_sector_rotation, get_portfolio_sector_exposure,
     format_sector_rotation, SECTOR_NAME_MAP,
 )
+
+
+def _parse_number(value):
+    """Parse a numeric cell tolerantly.
+
+    Strips ``$``, thousands commas and surrounding whitespace, and treats
+    common empty sentinels ("N/A", "NA", "NULL", "-", "—") as missing.
+
+    Returns a finite ``float``, or ``None`` when the value is missing / blank
+    / a sentinel. Raises ``ValueError`` on genuinely malformed input (e.g.
+    "1O0") so the caller can distinguish "not provided" from "garbage" and
+    log accordingly. ``inf`` / ``nan`` are rejected as ``None`` because
+    ``float()`` accepts them silently and they would poison downstream math.
+
+    Note: thousands separators only survive inside a *quoted* CSV cell
+    ("485,000"); an unquoted 485,000 is split by the CSV delimiter before it
+    ever reaches this function.
+    """
+    if value is None:
+        return None
+    cleaned = str(value).strip().replace("$", "").replace(",", "")
+    if not cleaned or cleaned.upper() in {"N/A", "NA", "NULL", "-", "—"}:
+        return None
+    number = float(cleaned)  # may raise ValueError on malformed input
+    if not math.isfinite(number):  # rejects inf / nan (float() accepts them)
+        return None
+    return number
 
 
 def load_holdings_from_file(filepath):
@@ -65,11 +92,18 @@ def load_holdings_from_file(filepath):
                 ticker = parts[0].strip().upper()
                 if not ticker or not ticker.isalpha():
                     continue
-                shares = float(parts[1]) if len(parts) > 1 and parts[1].strip() else None
-                avg_cost = float(parts[2]) if len(parts) > 2 and parts[2].strip() else None
-                if shares is None or avg_cost is None:
-                    print(f"  WARNING: {ticker} missing shares or avg_cost — skipping")
-                    print(f"           CSV format: ticker,shares,avg_cost")
+                raw_shares = parts[1] if len(parts) > 1 else None
+                raw_cost = parts[2] if len(parts) > 2 else None
+                try:
+                    shares = _parse_number(raw_shares)
+                    avg_cost = _parse_number(raw_cost)
+                except (TypeError, ValueError):
+                    print(f"  WARNING: {ticker} has invalid numeric values — skipping this row")
+                    print(f"           CSV format: ticker,shares,avg_cost (no thousands separators)")
+                    continue
+                if shares is None or avg_cost is None or shares <= 0 or avg_cost <= 0:
+                    print(f"  WARNING: {ticker} has invalid/missing shares or avg_cost — skipping")
+                    print(f"           CSV format: ticker,shares,avg_cost (must be positive numbers)")
                     continue
                 holdings.append({
                     "ticker": ticker,
@@ -85,12 +119,17 @@ def load_holdings_from_file(filepath):
                 shares_key = next((k for k in row if k.lower() in ("shares", "quantity", "qty")), None)
                 cost_key = next((k for k in row if k.lower() in ("avg_cost", "cost", "price", "avg_price")), None)
 
-                shares = float(row[shares_key]) if shares_key and row.get(shares_key, "").strip() else None
-                avg_cost = float(row[cost_key]) if cost_key and row.get(cost_key, "").strip() else None
+                try:
+                    shares = _parse_number(row.get(shares_key)) if shares_key else None
+                    avg_cost = _parse_number(row.get(cost_key)) if cost_key else None
+                except (TypeError, ValueError):
+                    print(f"  WARNING: {ticker} has invalid numeric values — skipping this row")
+                    print(f"           shares / avg_cost columns must contain valid numbers")
+                    continue
 
-                if shares is None or avg_cost is None:
-                    print(f"  WARNING: {ticker} missing shares or avg_cost — skipping")
-                    print(f"           CSV must have: ticker, shares, avg_cost columns")
+                if shares is None or avg_cost is None or shares <= 0 or avg_cost <= 0:
+                    print(f"  WARNING: {ticker} has invalid/missing shares or avg_cost — skipping")
+                    print(f"           CSV must have: ticker, shares, avg_cost (positive numbers)")
                     continue
 
                 holdings.append({
@@ -1144,10 +1183,13 @@ def main():
                 print(f"         Example: AAPL:100:150.50")
                 sys.exit(1)
             try:
-                shares = float(parts[1])
-                avg_cost = float(parts[2])
-            except ValueError:
+                shares = _parse_number(parts[1])
+                avg_cost = _parse_number(parts[2])
+            except (TypeError, ValueError):
                 print(f"  ERROR: {t} — shares and avg_cost must be numbers")
+                sys.exit(1)
+            if shares is None or avg_cost is None or shares <= 0 or avg_cost <= 0:
+                print(f"  ERROR: {t} — shares and avg_cost must be positive numbers")
                 sys.exit(1)
             holdings.append({"ticker": ticker, "shares": shares, "avg_cost": avg_cost})
     else:
