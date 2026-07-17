@@ -60,7 +60,7 @@ Zajednički koren više bugova je **yfinance dvosmislenost "frakcija vs procenat
 | 10 | `data_fetchers.py` | 🟡 | `yfinance_earnings` koristi uklonjeni `quarterly_earnings` | AttributeError u fallback grani |
 | 11 | `entry_exit.py` | 🟡 | Sajzing ignoriše kupovnu moć i float | Može prikazati poziciju od 500% računa |
 | 12 | `run_portfolio_review.py` | 🟡 | `float()` u CSV parsiranju bez try/except | Loš broj ruši ceo review — **✅ ISPRAVLJENO** |
-| 13 | `data_cache.py` / `run_deep_dive.py` | ⚪ | Ključevi fetcher-a ≠ ključevi formatera | Kozmetički "N/A" u `.md` (ocene netaknute) |
+| 13 | `data_cache.py` | 🟡 | Formater čita drugu šemu ključeva nego producenti (tehnika, cena, R:R, insider, news, earnings, congress, dividends, TV) + `above_sma None→"Below"` (pogrešna tvrdnja) | Glavni `.md` artefakt prazan/netačan (ocene netaknute) — **✅ ISPRAVLJENO** |
 | 14 | `data_cache.py` | ⚪ | `_fmt_pct` `abs<1` heuristika mis-scale | Pogrešno prikazan dividend_yield |
 | 15 | `technical_analysis.py` | ⚪ | `golden_cross`/`death_cross` su stanje, ne događaj | Duplira `above_sma`, pogrešan naziv |
 | 16 | `api_config.py` | ⚪ | `enabled` flag se ignoriše | Dokumentacija govori da se postavi, kôd ne čita |
@@ -117,7 +117,7 @@ Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 ### `data_cache.py` — keš (.md + .json po tikeru/danu)
 Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFrame-ova, robusna serijalizacija (pandas/numpy). Ali:
 - ⚪ **#14 — `_fmt_pct` heuristika `if abs(pct) < 1: pct *= 100` je opasna.** Za yfinance dividend_yield (posle promene 2024. čas frakcija 0.005, čas procenat 0.5) pogrešno skalira — 0.9% postane 90%.
-- ⚪ **#13 — Neslaganje ključeva fetcher↔formater** (vidi Sloj 5, `run_deep_dive`).
+- 🟡 **#13 — Neslaganje ključeva fetcher/motor ↔ formater** (vidi [Status ispravki](#status-ispravki)). **✅ ISPRAVLJENO.**
 
 ---
 
@@ -175,7 +175,7 @@ Najčistiji modul — batch download, relativna snaga po 1W/1M/3M, kompozit (0.4
 
 ### `run_deep_dive.py` — Use Case 3 (flagship)
 - 🔴 **#4 — Fallback lanac za cenu je praktično kozmetički.** `compute_technicals` traži `price_data["data"]` kao pandas DataFrame — a to vraća **samo yfinance**. Polygon vraća `results` (lista), Alpha Vantage `time_series` (dict), FMP `data` (lista). Ako yfinance padne (429) i cenu posluži fallback → `price_df` je None/lista → TA pukne → `technicals=None`. Cela "otporna" priča za `price_history` je šuplja nizvodno. (Ne ruši se — tech_score padne na 5.0, entry/exit koristi grubi 2%-ATR — ali je degradirano.)
-- ⚪ **#13 — Potvrđen kozmetički gap u keširanom `.md`:** `save_cache` dobija sirov fetcher dict, a formater traži druge ključeve (`previous_close`, `week_52_high`, `ev_to_ebitda`, `peg_ratio`, `current_ratio`, `eps_ttm`...) → te linije pokazuju "N/A". **Ocene NISU pogođene** (scoring čita sirov dict direktno); samo ljudski-čitljiv prikaz.
+- 🟡 **#13 — Neslaganje šeme ključeva u keširanom `.md`** (širi nego prvobitno procenjeno). `save_cache` dobija sirov fetcher/motor dict, a `_format_markdown` čita drugu šemu → prazno/N/A u tehnici (RSI/MACD/ATR/BB/S-R/Fibonacci), price zaglavlju, R:R (čitan sa pogrešnog mesta), insider, news, earnings, congress, dividends, TV oscilatorima. Dodatno `above_sma None→"Below"` je *pogrešna tvrdnja*, ne samo izostavljena. **Ocene NISU pogođene** (scoring/entry-exit čitaju sirov dict direktno). **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
 - ⚪ `_estimate_title_sentiment` koristi substring poklapanje → "miss" u "commission", "cut" u "prosecuted" → lažni bearish signali.
 - ⚪ Mrtav kôd: `words = set(title.lower().split())` se izračuna a ne koristi; `_fmt_pct`/`_fmt_dollars` definisani a nigde pozvani.
 
@@ -240,7 +240,7 @@ IB traži pokrenut **TWS/IB Gateway** + **plaćene market-data pretplate** (real
 Od najmanjeg (najniži rizik, najmanji zahvat) ka najvećem:
 
 1. ~~**`run_portfolio_review.py`** — CSV `float()` u try/except (#12) 🟡~~ **✅ URAĐENO**
-2. **`data_cache.py`/`run_deep_dive.py`** — uskladiti ključeve fetcher↔formater (#13) ⚪
+2. ~~**`data_cache.py`** — uskladiti ključeve fetcher/motor↔formater (#13) 🟡~~ **✅ URAĐENO**
 3. **`data_fetchers.py`** — ukloniti bespotrebne SEC pozive + koristiti config email (#6, #7) 🟡
 4. **`entry_exit.py`** — cap sajzinga na kupovnu moć + % float/ADV (#11, spaja se sa #18) 🟡
 5. **`macro_calendar.py`** — `get_api_key("finnhub")` umesto `config.get("api_keys")` (#5) 🔴
@@ -249,7 +249,10 @@ Od najmanjeg (najniži rizik, najmanji zahvat) ka najvećem:
 8. **`scoring.py`** — uvek `de/100` za Debt-to-Equity (#2) 🔴
 9. **`scoring.py`** — ispraviti ROE skaliranje (#1) 🔴
 
-Paralelno / kao zasebna crta: **#18 (free float + short interest)** i **IB/L2 integracija** kao veća nadogradnja (novi `ibkr` fetcher, `market_depth` kategorija, auto-import portfolija).
+Paralelno / kao zasebne crte:
+- **#18 (free float + short interest)** — likvidnosne/squeeze metrike + sajzing na % float/ADV.
+- **Fundamental-enrichment** (zaseban zadatak, *odvojen* od #18) — dohvatiti valuation polja koja formater prikazuje ali `yfinance_fundamentals` ne dohvata: `enterpriseToEbitda`, `pegRatio`, `currentRatio`, `totalCash`, `totalDebt`, `forwardEps`. Sve postoji u yfinance `.info`.
+- **IB/L2 integracija** — veća nadogradnja (novi `ibkr` fetcher, `market_depth` kategorija, auto-import portfolija).
 
 ---
 
@@ -272,6 +275,24 @@ Pozivna mesta: `try/except (TypeError, ValueError)` → graciozan skip **samo to
 **Verifikacija:** `tests/test_csv_parsing.py` — **22/22 PASS**. Matrica: validan broj, `$150.50`, `N/A`, `1O0`, `nan`, `inf`, negativno, nula, i loš red između dva validna reda (potvrđeno da se preskače samo taj red, review se ne ruši). Pokretanje: `.venv/bin/python tests/test_csv_parsing.py`.
 
 Izmenjeni fajlovi: `scripts/run_portfolio_review.py` (+`_parse_number`, 3 putanje), `tests/test_csv_parsing.py` (nov).
+
+### ✅ Bug #13 — Formater keširanog `.md` čita pogrešnu šemu ključeva (2026-07-17)
+
+**Obim (širi nego prvobitno):** ne samo tehnika i cena, nego i R:R (čitan iz pogrešnog mesta — top-level polje, trostruko pogrešno: lokacija, ključ kombinacija, i `ratio` umesto `rr_ratio`), insider (i container i polja po redu), news, earnings, congress, dividends, TV oscilatori (velika vs mala slova), i `above_sma None→"Below"` (pogrešna tvrdnja).
+
+**Rešenje (Opcija A — presentation adapteri, jedan fajl, bez uticaja na scoring):**
+- Dodati `_normalize_technical_view()` i `_normalize_price_view()` — mapiraju sirove ključeve (`rsi_14`→`rsi`, `macd_line`→`macd`, `atr_14`→`atr`, `bb_mid`→`bb_middle`, `bb_position`→`%B` (0–1 odnos), `support_resistance`→supports/resistances, `fibonacci`→retracements/extensions). Price view izračunava `previous_close`/`daily_change`/`avg_volume` iz OHLCV df-a (uz guard za df<2 reda / NaN / ne-df fallback), a 52-nedeljni iz `fundamentals` ili df-a.
+- Tri-state helperi `_above_below`/`_yes_no`: `None → "N/A"` (ne lažno "Below"/"No").
+- **Uklonjen** `volume_trend` (ne izmišlja se iz `volume_ratio` — odnos ≠ trend); umesto toga prikaz `volume_latest` + `volume_avg_20`.
+- Dodat **raw Technical JSON blok** kao sigurnosna mreža (jedina sekcija bez njega).
+- R:R čitan sa `ee["risk_reward"]` (obrazac iz `run_portfolio_review`), prikaz najboljih favorable kombinacija.
+- Ključevi usklađeni: insider (`recent_transactions` + Finnhub polja `filingDate`/`transactionCode`/`share`/`transactionPrice`), news (`avg_sentiment`→label), earnings (`earnings` lista), congress (`congress_trades`), dividends (`dividend_rate`), TV oscilatori (mala slova).
+
+**Ograničenje:** neprikupljena valuation polja (`ev_to_ebitda`, `peg_ratio`, `current_ratio`, `total_cash`, `total_debt`, `eps_ttm/forward`) ostaju N/A — prebačeno u zaseban **Fundamental-enrichment** zadatak (vidi Preporučen redosled).
+
+**Verifikacija:** `tests/test_markdown_formatter.py` — **23/23 PASS**, koristi *stvarni* `compute_technicals()` + `compute_entry_exit()` izlaz (hvata budući schema drift), uključujući kratku istoriju (60 redova) gde `above_sma200` mora biti "N/A", ne "Below". #12 regresija i dalje 22/22. Pokretanje: `.venv/bin/python tests/test_markdown_formatter.py`.
+
+Izmenjeni fajlovi: `scripts/data_cache.py` (+4 adaptera/helpera, ~10 sekcija formatera), `tests/test_markdown_formatter.py` (nov).
 
 ---
 

@@ -134,6 +134,109 @@ def list_cached_tickers(day=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  PRESENTATION ADAPTERS
+#  These map raw producer output (compute_technicals, fetchers) onto the
+#  display schema the markdown formatter uses. Presentation-only — they do
+#  NOT touch scoring / entry-exit, which read the raw dicts directly.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _above_below(val):
+    """Tri-state: True→Above, False→Below, None→N/A (unknown, not 'Below')."""
+    if val is True:
+        return "Above"
+    if val is False:
+        return "Below"
+    return "N/A"
+
+
+def _yes_no(val):
+    """Tri-state: True→Yes, False→No, None→N/A."""
+    if val is True:
+        return "Yes"
+    if val is False:
+        return "No"
+    return "N/A"
+
+
+def _normalize_technical_view(tech):
+    """Map raw compute_technicals() keys onto the display schema."""
+    tech = tech or {}
+    sr = tech.get("support_resistance") or {}
+    fib = tech.get("fibonacci") or {}
+    bb_upper = tech.get("bb_upper")
+    bb_lower = tech.get("bb_lower")
+    bb_mid = tech.get("bb_mid")
+    bb_width = None
+    if bb_upper is not None and bb_lower is not None and bb_mid:
+        bb_width = (bb_upper - bb_lower) / bb_mid  # relative band width
+    return {
+        "tech_score": tech.get("tech_score", tech.get("technical_score")),
+        "sma_20": tech.get("sma_20"),
+        "sma_50": tech.get("sma_50"),
+        "sma_200": tech.get("sma_200"),
+        "above_sma50": tech.get("above_sma50"),
+        "above_sma200": tech.get("above_sma200"),
+        "golden_cross": tech.get("golden_cross"),
+        "death_cross": tech.get("death_cross"),
+        "rsi": tech.get("rsi_14"),
+        "macd": tech.get("macd_line"),
+        "macd_signal": tech.get("macd_signal"),
+        "macd_hist": tech.get("macd_histogram"),
+        "stoch_k": tech.get("stoch_k"),
+        "stoch_d": tech.get("stoch_d"),
+        "adx": tech.get("adx"),
+        "atr": tech.get("atr_14"),
+        "bb_upper": bb_upper,
+        "bb_mid": bb_mid,
+        "bb_lower": bb_lower,
+        "bb_width": bb_width,
+        "bb_pctb": tech.get("bb_position"),  # %B is a 0-1 ratio, not a percent
+        "supports": sr.get("supports", []),
+        "resistances": sr.get("resistances", []),
+        "retracements": fib.get("retracements", {}),
+        "extensions": fib.get("extensions", {}),
+        "volume_latest": tech.get("volume_latest"),
+        "volume_avg_20": tech.get("volume_avg_20"),
+        "volume_ratio": tech.get("volume_ratio"),
+    }
+
+
+def _normalize_price_view(price, fundamentals=None):
+    """Derive the price-header stats from the raw price fetcher output + its
+    OHLCV DataFrame. Presentation-only; never raises (falls back to None)."""
+    price = price or {}
+    fundamentals = fundamentals or {}
+    view = {
+        "latest_close": price.get("latest_close"),
+        "volume": price.get("latest_volume"),
+        "previous_close": None,
+        "daily_change_pct": None,
+        "avg_volume": None,
+        "week_52_high": fundamentals.get("52w_high"),
+        "week_52_low": fundamentals.get("52w_low"),
+        "data": price.get("data"),
+    }
+    df = price.get("data")
+    try:
+        cols = getattr(df, "columns", [])
+        if df is not None and hasattr(df, "iloc") and len(df) >= 2 and "Close" in cols:
+            prev = float(df["Close"].iloc[-2])
+            view["previous_close"] = prev
+            latest = view["latest_close"]
+            if latest is not None and prev:
+                view["daily_change_pct"] = (latest / prev - 1) * 100
+        if df is not None and "Volume" in cols and len(df) >= 1:
+            view["avg_volume"] = float(df["Volume"].tail(20).mean())
+        if view["week_52_high"] is None and "High" in cols:
+            view["week_52_high"] = float(df["High"].tail(252).max())
+        if view["week_52_low"] is None and "Low" in cols:
+            view["week_52_low"] = float(df["Low"].tail(252).min())
+    except Exception:
+        pass  # display-only; never let formatting break the cache
+    return view
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  MARKDOWN FORMATTER
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -163,21 +266,22 @@ def _format_markdown(ticker, day, data, config_status=None):
     # ─── Price History ────────────────────────────────────────────
     price = data.get("price_history")
     if price:
+        pv = _normalize_price_view(price, data.get("fundamentals"))
         _h(f"## Price History")
         _h(f"")
-        _h(f"- **Latest Close:** ${_safe_num(price.get('latest_close'), '$')}")
-        _h(f"- **Previous Close:** ${_safe_num(price.get('previous_close'), '$')}")
-        _h(f"- **52-Week High:** ${_safe_num(price.get('week_52_high'), '$')}")
-        _h(f"- **52-Week Low:** ${_safe_num(price.get('week_52_low'), '$')}")
-        _h(f"- **Volume:** {_safe_num(price.get('volume'), 'int')}")
-        _h(f"- **Avg Volume:** {_safe_num(price.get('avg_volume'), 'int')}")
+        _h(f"- **Latest Close:** ${_safe_num(pv.get('latest_close'), '$')}")
+        _h(f"- **Previous Close:** ${_safe_num(pv.get('previous_close'), '$')}")
+        _h(f"- **52-Week High:** ${_safe_num(pv.get('week_52_high'), '$')}")
+        _h(f"- **52-Week Low:** ${_safe_num(pv.get('week_52_low'), '$')}")
+        _h(f"- **Volume:** {_safe_num(pv.get('volume'), 'int')}")
+        _h(f"- **Avg Volume (20d):** {_safe_num(pv.get('avg_volume'), 'int')}")
 
-        change = price.get("daily_change_pct")
+        change = pv.get("daily_change_pct")
         if change is not None:
             _h(f"- **Daily Change:** {change:.2f}%")
 
         # Price data table (last 20 days if available)
-        df_data = price.get("data")
+        df_data = pv.get("data")
         if df_data is not None and hasattr(df_data, "tail"):
             _h(f"")
             _h(f"### Recent Price Data (Last 20 Trading Days)")
@@ -243,57 +347,69 @@ def _format_markdown(ticker, day, data, config_status=None):
         _h(f"")
 
     # ─── Technical Analysis ───────────────────────────────────────
-    tech = data.get("technicals")
-    if tech:
+    tech_raw = data.get("technicals")
+    if tech_raw:
+        tview = _normalize_technical_view(tech_raw)
         _h(f"## Technical Analysis")
         _h(f"")
-        _h(f"- **Tech Score:** {_safe_num(tech.get('tech_score'))}/10")
+        _h(f"- **Tech Score:** {_safe_num(tview.get('tech_score'))}/10")
         _h(f"")
         _h(f"### Trend")
-        _h(f"- SMA 20: {_safe_num(tech.get('sma_20'), '$')}")
-        _h(f"- SMA 50: {_safe_num(tech.get('sma_50'), '$')}")
-        _h(f"- SMA 200: {_safe_num(tech.get('sma_200'), '$')}")
-        _h(f"- Price vs SMA50: {'Above' if tech.get('above_sma50') else 'Below'}")
-        _h(f"- Price vs SMA200: {'Above' if tech.get('above_sma200') else 'Below'}")
-        _h(f"- Golden Cross: {'Yes' if tech.get('golden_cross') else 'No'}")
-        _h(f"- Death Cross: {'Yes' if tech.get('death_cross') else 'No'}")
+        _h(f"- SMA 20: {_safe_num(tview.get('sma_20'), '$')}")
+        _h(f"- SMA 50: {_safe_num(tview.get('sma_50'), '$')}")
+        _h(f"- SMA 200: {_safe_num(tview.get('sma_200'), '$')}")
+        _h(f"- Price vs SMA50: {_above_below(tview.get('above_sma50'))}")
+        _h(f"- Price vs SMA200: {_above_below(tview.get('above_sma200'))}")
+        _h(f"- Golden Cross: {_yes_no(tview.get('golden_cross'))}")
+        _h(f"- Death Cross: {_yes_no(tview.get('death_cross'))}")
         _h(f"")
         _h(f"### Momentum")
-        _h(f"- RSI (14): {_safe_num(tech.get('rsi'))}")
-        _h(f"- MACD: {_safe_num(tech.get('macd'))}")
-        _h(f"- MACD Signal: {_safe_num(tech.get('macd_signal'))}")
-        _h(f"- MACD Histogram: {_safe_num(tech.get('macd_hist'))}")
-        _h(f"- Stochastic %K: {_safe_num(tech.get('stoch_k'))}")
-        _h(f"- Stochastic %D: {_safe_num(tech.get('stoch_d'))}")
-        _h(f"- ADX: {_safe_num(tech.get('adx'))}")
+        _h(f"- RSI (14): {_safe_num(tview.get('rsi'))}")
+        _h(f"- MACD: {_safe_num(tview.get('macd'))}")
+        _h(f"- MACD Signal: {_safe_num(tview.get('macd_signal'))}")
+        _h(f"- MACD Histogram: {_safe_num(tview.get('macd_hist'))}")
+        _h(f"- Stochastic %K: {_safe_num(tview.get('stoch_k'))}")
+        _h(f"- Stochastic %D: {_safe_num(tview.get('stoch_d'))}")
+        _h(f"- ADX: {_safe_num(tview.get('adx'))}")
         _h(f"")
         _h(f"### Volatility")
-        _h(f"- ATR (14): {_safe_num(tech.get('atr'), '$')}")
-        _h(f"- Bollinger Upper: {_safe_num(tech.get('bb_upper'), '$')}")
-        _h(f"- Bollinger Middle: {_safe_num(tech.get('bb_middle'), '$')}")
-        _h(f"- Bollinger Lower: {_safe_num(tech.get('bb_lower'), '$')}")
-        _h(f"- BB Width: {_safe_num(tech.get('bb_width'))}")
-        _h(f"- BB %B: {_safe_num(tech.get('bb_pctb'))}")
+        _h(f"- ATR (14): {_safe_num(tview.get('atr'), '$')}")
+        _h(f"- Bollinger Upper: {_safe_num(tview.get('bb_upper'), '$')}")
+        _h(f"- Bollinger Middle: {_safe_num(tview.get('bb_mid'), '$')}")
+        _h(f"- Bollinger Lower: {_safe_num(tview.get('bb_lower'), '$')}")
+        _h(f"- BB Width (relative): {_safe_num(tview.get('bb_width'))}")
+        _h(f"- BB %B (0-1): {_safe_num(tview.get('bb_pctb'))}")
         _h(f"")
         _h(f"### Support & Resistance")
-        supports = tech.get("support_levels", [])
-        resistances = tech.get("resistance_levels", [])
+        supports = tview.get("supports", [])
+        resistances = tview.get("resistances", [])
         if supports:
             _h(f"- Supports: {', '.join([f'${s:.2f}' for s in supports[:5]])}")
         if resistances:
             _h(f"- Resistances: {', '.join([f'${r:.2f}' for r in resistances[:5]])}")
 
-        fibs = tech.get("fibonacci_levels", {})
-        if fibs:
+        retracements = tview.get("retracements", {})
+        extensions = tview.get("extensions", {})
+        if retracements or extensions:
             _h(f"")
             _h(f"### Fibonacci Levels")
-            for level, price in fibs.items():
-                _h(f"- {level}: ${price:.2f}" if isinstance(price, (int, float)) else f"- {level}: {price}")
+            for level, lvl_price in list(retracements.items()) + list(extensions.items()):
+                _h(f"- {level}: ${lvl_price:.2f}" if isinstance(lvl_price, (int, float)) else f"- {level}: {lvl_price}")
         _h(f"")
 
         _h(f"### Volume Analysis")
-        _h(f"- Volume Ratio (vs avg): {_safe_num(tech.get('volume_ratio'))}")
-        _h(f"- Volume Trend: {tech.get('volume_trend', 'N/A')}")
+        _h(f"- Latest Volume: {_safe_num(tview.get('volume_latest'), 'int')}")
+        _h(f"- Avg Volume (20d): {_safe_num(tview.get('volume_avg_20'), 'int')}")
+        _h(f"- Volume Ratio (vs avg): {_safe_num(tview.get('volume_ratio'))}")
+        _h(f"")
+
+        # Raw technical data as a JSON safety net — this section previously
+        # had none, so any display-schema drift silently lost the data.
+        _h(f"### All Technical Data")
+        _h(f"")
+        _h(f"```json")
+        _h(json.dumps(_make_serializable(tech_raw), indent=2, default=str))
+        _h(f"```")
         _h(f"")
 
     # ─── TradingView Consensus ────────────────────────────────────
@@ -305,16 +421,18 @@ def _format_markdown(ticker, day, data, config_status=None):
         _h(f"- Buy Signals: {tv.get('buy_count', 'N/A')}")
         _h(f"- Neutral Signals: {tv.get('neutral_count', 'N/A')}")
         _h(f"- Sell Signals: {tv.get('sell_count', 'N/A')}")
-        if tv.get("oscillators"):
+        osc = tv.get("oscillators")
+        if isinstance(osc, dict):
             _h(f"")
             _h(f"### Oscillators")
-            _h(f"- Recommendation: {tv['oscillators'].get('RECOMMENDATION', 'N/A')}")
-            for k, v in tv.get("oscillators_detail", {}).items():
-                _h(f"- {k}: {v}")
-        if tv.get("moving_averages"):
+            _h(f"- Recommendation: {osc.get('recommendation', osc.get('RECOMMENDATION', 'N/A'))}")
+            _h(f"- Buy/Neutral/Sell: {osc.get('buy', 0)}/{osc.get('neutral', 0)}/{osc.get('sell', 0)}")
+        ma = tv.get("moving_averages")
+        if isinstance(ma, dict):
             _h(f"")
             _h(f"### Moving Averages")
-            _h(f"- Recommendation: {tv['moving_averages'].get('RECOMMENDATION', 'N/A')}")
+            _h(f"- Recommendation: {ma.get('recommendation', ma.get('RECOMMENDATION', 'N/A'))}")
+            _h(f"- Buy/Neutral/Sell: {ma.get('buy', 0)}/{ma.get('neutral', 0)}/{ma.get('sell', 0)}")
         _h(f"")
 
     # ─── Analyst Ratings ──────────────────────────────────────────
@@ -346,7 +464,8 @@ def _format_markdown(ticker, day, data, config_status=None):
         _h(f"## Earnings")
         _h(f"")
         if isinstance(earnings, dict):
-            recent = earnings.get("recent_quarters", earnings.get("earnings_history", []))
+            recent = (earnings.get("recent_quarters") or earnings.get("earnings_history")
+                      or earnings.get("earnings", []))
             if recent and isinstance(recent, list):
                 _h(f"### Recent Quarters")
                 _h(f"")
@@ -374,19 +493,27 @@ def _format_markdown(ticker, day, data, config_status=None):
         _h(f"## Insider Trades")
         _h(f"")
         if isinstance(insider, dict):
-            _h(f"- Net Activity (3m): {insider.get('net_activity', 'N/A')}")
-            _h(f"- Buys: {insider.get('buy_count', 'N/A')}")
-            _h(f"- Sells: {insider.get('sell_count', 'N/A')}")
-            _h(f"- Net Shares: {insider.get('net_shares', 'N/A')}")
-            trades = insider.get("recent_trades", [])
+            buys = insider.get("buys_last_50", insider.get("buy_count"))
+            sells = insider.get("sells_last_50", insider.get("sell_count"))
+            _h(f"- Signal: {insider.get('net_insider_signal', insider.get('net_activity', 'N/A'))}")
+            _h(f"- Buys (last 50): {buys if buys is not None else 'N/A'}")
+            _h(f"- Sells (last 50): {sells if sells is not None else 'N/A'}")
+            trades = insider.get("recent_transactions", insider.get("recent_trades", []))
             if trades:
                 _h(f"")
                 _h(f"### Recent Trades")
                 _h(f"")
-                _h(f"| Date | Name | Type | Shares | Price |")
+                _h(f"| Date | Name | Code | Shares | Price |")
                 _h(f"|------|------|------|--------|-------|")
                 for t in trades[:15]:
-                    _h(f"| {t.get('date', 'N/A')} | {t.get('name', 'N/A')} | {t.get('transaction_type', 'N/A')} | {_safe_num(t.get('shares'), 'int')} | {_safe_num(t.get('price'), '$')} |")
+                    # Finnhub uses filingDate/transactionCode/share/transactionPrice;
+                    # fall back to the generic names for other providers.
+                    dt = t.get("filingDate") or t.get("transactionDate") or t.get("date", "N/A")
+                    name = t.get("name", "N/A")
+                    code = t.get("transactionCode") or t.get("transaction_type", "N/A")
+                    shares = t.get("share", t.get("shares"))
+                    tprice = t.get("transactionPrice", t.get("price"))
+                    _h(f"| {dt} | {name} | {code} | {_safe_num(shares, 'int')} | {_safe_num(tprice, '$')} |")
             _h(f"")
         _h(f"```json")
         _h(json.dumps(_make_serializable(insider), indent=2, default=str))
@@ -399,8 +526,17 @@ def _format_markdown(ticker, day, data, config_status=None):
         _h(f"## News Sentiment")
         _h(f"")
         if isinstance(news, dict):
-            _h(f"- Overall Sentiment: {news.get('overall_sentiment', 'N/A')}")
-            _h(f"- Sentiment Score: {_safe_num(news.get('sentiment_score'))}")
+            avg_sent = news.get("avg_sentiment", news.get("sentiment_score"))
+            if avg_sent is None:
+                overall = "N/A"
+            elif avg_sent > 0.15:
+                overall = "Bullish"
+            elif avg_sent < -0.15:
+                overall = "Bearish"
+            else:
+                overall = "Neutral"
+            _h(f"- Overall Sentiment: {overall}")
+            _h(f"- Sentiment Score: {_safe_num(avg_sent)}")
             _h(f"- Articles Analyzed: {news.get('article_count', 'N/A')}")
             articles_list = news.get("articles", [])
             if articles_list:
@@ -466,8 +602,10 @@ def _format_markdown(ticker, day, data, config_status=None):
             for t in congress[:20]:
                 _h(f"| {t.get('date', 'N/A')} | {t.get('member', 'N/A')} | {t.get('type', 'N/A')} | {t.get('amount', 'N/A')} |")
         elif isinstance(congress, dict):
-            _h(f"- Recent Trades: {congress.get('trade_count', 'N/A')}")
-            trades = congress.get("trades", [])
+            trades = congress.get("congress_trades", congress.get("trades", []))
+            if not isinstance(trades, list):
+                trades = []
+            _h(f"- Recent Trades: {congress.get('trade_count', len(trades))}")
             if trades:
                 _h(f"")
                 _h(f"| Date | Member | Type | Amount |")
@@ -488,7 +626,7 @@ def _format_markdown(ticker, day, data, config_status=None):
         if isinstance(divs, dict):
             _h(f"- Dividend Yield: {_fmt_pct(divs.get('dividend_yield'))}")
             _h(f"- Payout Ratio: {_fmt_pct(divs.get('payout_ratio'))}")
-            _h(f"- Annual Dividend: {_safe_num(divs.get('annual_dividend'), '$')}")
+            _h(f"- Annual Dividend: {_safe_num(divs.get('annual_dividend', divs.get('dividend_rate')), '$')}")
             _h(f"- Ex-Dividend Date: {divs.get('ex_dividend_date', 'N/A')}")
         _h(f"")
         _h(f"```json")
@@ -568,13 +706,7 @@ def _format_markdown(ticker, day, data, config_status=None):
                 _h(f"### Exit Targets")
                 for level, info in targets.items():
                     if isinstance(info, dict):
-                        rr = info.get("risk_reward", {})
-                        rr_str = ""
-                        if rr:
-                            for entry_name, ratio_info in rr.items():
-                                if isinstance(ratio_info, dict):
-                                    rr_str += f" | {entry_name} R:R = {ratio_info.get('ratio', 'N/A')}x"
-                        _h(f"- **{level.replace('_', ' ').title()}:** ${info.get('price', 0):.2f}{rr_str}")
+                        _h(f"- **{level.replace('_', ' ').title()}:** ${info.get('price', 0):.2f}")
                     else:
                         _h(f"- **{level}:** ${info:.2f}" if isinstance(info, (int, float)) else f"- **{level}:** {info}")
 
@@ -587,6 +719,21 @@ def _format_markdown(ticker, day, data, config_status=None):
                     _h(f"- **Risk:** {stop.get('pct_from_current', 0):.1f}% from current")
                 else:
                     _h(f"- **Stop Loss:** ${stop:.2f}")
+
+            # Risk/Reward is a TOP-LEVEL field ({combo_name: {rr_ratio, ...}}),
+            # not nested per target. Mirror run_portfolio_review: show the best
+            # favorable combos, ranked by rr_ratio.
+            rr = ee.get("risk_reward")
+            if isinstance(rr, dict) and rr:
+                _h(f"")
+                _h(f"### Risk / Reward")
+                items = [(k, v) for k, v in rr.items() if isinstance(v, dict)]
+                favorable = [(k, v) for k, v in items if v.get("favorable")]
+                ranked = sorted(favorable or items, key=lambda kv: -kv[1].get("rr_ratio", 0))
+                for name, combo in ranked[:3]:
+                    _h(f"- {name}: R:R = {combo.get('rr_ratio', 0):.1f}x "
+                       f"(entry ${combo.get('entry', 0):.2f} → target ${combo.get('target', 0):.2f}, "
+                       f"stop ${combo.get('stop', 0):.2f})")
 
             sizing = ee.get("position_sizes")
             if sizing:
