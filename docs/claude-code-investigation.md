@@ -53,8 +53,8 @@ Zajednički koren više bugova je **yfinance dvosmislenost "frakcija vs procenat
 | 3 | `technical_analysis.py` | 🔴 | MACD signal/histogram zamenjeni (pandas-ta grana) | `macd_bullish` skoro uvek pogrešan |
 | 4 | `run_deep_dive.py` | 🔴 | Price fallback lanac šupalj — samo yfinance daje upotrebljiv oblik | Nema tehnike kad yfinance padne |
 | 5 | `macro_calendar.py` | 🔴 | Finnhub kalendar mrtav (`api_keys` vs `apis`) | Makro događaji samo hardkodovani, zastareli posle 2026. |
-| 6 | `data_fetchers.py` | 🟡 | `sec_edgar_filings` 2 bespotrebna poziva + lažni URL | Trošenje HTTP poziva |
-| 7 | `data_fetchers.py` | 🟡 | Hardkodovan UA `contact@example.com` | SEC 403 rizik |
+| 6 | `data_fetchers.py` | 🟡 | `sec_edgar_filings` 2 mrtva poziva; + izmešten iz `fundamentals` (maskirao finnhub/fmp), pravi `document_url` | Trošenje poziva / lažna atribucija — **✅ ISPRAVLJENO** |
+| 7 | `data_fetchers.py` | 🟡 | Hardkodovan UA email ignoriše config | SEC nema kontakt; UA sad iz config-a, baca ako nema — **✅ ISPRAVLJENO** |
 | 8 | `data_fetchers.py` | 🟡 | `yfinance_analyst_ratings` zastareo šema | Prazne analitičar ocene |
 | 9 | `data_fetchers.py` | 🟡 | AV rate-limit detekcija zastarela (`Information`) | Nejasna greška na limitu |
 | 10 | `data_fetchers.py` | 🟡 | `yfinance_earnings` koristi uklonjeni `quarterly_earnings` | AttributeError u fallback grani |
@@ -98,9 +98,10 @@ Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 ## Sloj 2 — Podaci
 
 ### `data_fetchers.py` — implementacije poziva za svih 14 izvora
-- 🟡 **#6 — `sec_edgar_filings` pravi 2 bespotrebna HTTP poziva.** Prva dva zahteva (`r`, `r2`) se nikad ne koriste; prvi URL (`efts.sec.gov/LATEST/search-index`) nije ni pravi endpoint. Koriste se samo `company_tickers.json` i `submissions`.
-- 🟡 **Semantički mismatch:** `sec_edgar_filings` vraća listu filing-a, a registrovan je pod `fundamentals` lancem. Ako yfinance fundamentals padne, dobija se lista 10-K/10-Q dokumenata umesto finansijskih pokazatelja.
-- 🟡 **#7 — Hardkodovan User-Agent `contact@example.com`** umesto korisnikovog email-a iz config-a (`user_agent_email`). SEC blokira generičke UA → 403 rizik.
+- 🟡 **#6 — `sec_edgar_filings` pravi 2 bespotrebna HTTP poziva.** Prva dva zahteva (`r`, `r2`) se nikad ne koriste. (Ispravka ranije tvrdnje: `efts.sec.gov/LATEST/search-index` **postoji** i vraća JSON — backend EDGAR Full-Text Search-a — ali nije dokumentovan REST API i rezultat je ionako neiskorišćen.) **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
+- 🟡 **#6a — Semantički mismatch + maskiranje:** `sec_edgar_filings` vraća listu filing-a (bez metrika), a bio registrovan pod `fundamentals` → na yfinance-padu "uspevao" i maskirao finnhub/fmp + davao lažni "✓". Uz to: nema 10-K/10-Q filtera (vraća sve forme), `primaryDocument` je samo ime fajla (ne URL). **✅ ISPRAVLJENO** (izmešten u `filings` kategoriju, dodat pravi `document_url`).
+- 🟡 **#7 — Hardkodovan User-Agent** ignoriše config `user_agent_email`. SEC traži stvaran kontakt. **✅ ISPRAVLJENO** — UA se čita iz config-a (+env), baca `ValueError` ako nije podešen (bez placeholder-a); SEC je fallback pa `call_with_fallback` samo pređe dalje.
+- 🔴 **NOVI nalaz (sibling #4): fundamentals fallback je nemapiran.** Samo `yfinance_fundamentals` emituje ključeve koje scoring čita; `finnhub_financials` (`{metrics}`) i `fmp_fundamentals` (`{profile}`) koriste svoje šeme → na yfinance-padu scoring dobija neutralne vrednosti bez obzira koji fallback "uspe". Ide uz #4 (normalizacija) — **zaseban visoko-prioritetan zadatak.**
 - 🟡 **#8 — `yfinance_analyst_ratings` čita zastareo šema.** Traži `Firm`/`To Grade`/`Action`, ali moderni yfinance `.recommendations` vraća `[period, strongBuy, buy, hold, sell, strongSell]`. Rezultat: sva polja prazna.
 - ⚪ **`sec_insider_trades` je pogrešno imenovan** — funkcija se zove "sec" ali zove Finnhub API.
 - 🟡 **#9 — Alpha Vantage rate-limit detekcija zastarela.** AV sada vraća poruku pod ključem `"Information"`, a kôd gleda `"Note"`/`"Error Message"` → greška je nejasna ("Unknown"). Isto u `alpha_vantage_price_history` i `alpha_vantage_news_sentiment`.
@@ -241,7 +242,7 @@ Od najmanjeg (najniži rizik, najmanji zahvat) ka najvećem:
 
 1. ~~**`run_portfolio_review.py`** — CSV `float()` u try/except (#12) 🟡~~ **✅ URAĐENO**
 2. ~~**`data_cache.py`** — uskladiti ključeve fetcher/motor↔formater (#13) 🟡~~ **✅ URAĐENO**
-3. **`data_fetchers.py`** — ukloniti bespotrebne SEC pozive + koristiti config email (#6, #7) 🟡
+3. ~~**`data_fetchers.py`** — ukloniti bespotrebne SEC pozive + koristiti config email + izmestiti u `filings` (#6, #7, #6a) 🟡~~ **✅ URAĐENO (opcija b)**
 4. **`entry_exit.py`** — cap sajzinga na kupovnu moć + % float/ADV (#11, spaja se sa #18) 🟡
 5. **`macro_calendar.py`** — `get_api_key("finnhub")` umesto `config.get("api_keys")` (#5) 🔴
 6. **`technical_analysis.py`** — ispraviti redosled MACD kolona (#3) 🔴
@@ -252,6 +253,8 @@ Od najmanjeg (najniži rizik, najmanji zahvat) ka najvećem:
 Paralelno / kao zasebne crte:
 - **#18 (free float + short interest)** — likvidnosne/squeeze metrike + sajzing na % float/ADV.
 - **Fundamental-enrichment** (zaseban zadatak, *odvojen* od #18) — dohvatiti valuation polja koja formater prikazuje ali `yfinance_fundamentals` ne dohvata: `enterpriseToEbitda`, `pegRatio`, `currentRatio`, `totalCash`, `totalDebt`, `forwardEps`. Sve postoji u yfinance `.info`.
+- **Fundamentals fallback normalizacija** (sibling #4, visok prioritet) — mapirati `finnhub_financials` (`{metrics}`) i `fmp_fundamentals` (`{profile}`) na scoring šemu (`pe_ratio`, `revenue_growth`, `roe`...), da fallback posle yfinance-pada zaista hrani scoring, a ne neutralne vrednosti.
+- **Ožičavanje `filings` kategorije** (odloženi deo opcije (a) iz #6a) — dodati fetch+prikaz filing-a u `run_deep_dive`, `is_api_available("sec_edgar") → NEEDS CONTACT` kad email nije podešen. Do tada je `filings` definisan ali nepozvan.
 - **IB/L2 integracija** — veća nadogradnja (novi `ibkr` fetcher, `market_depth` kategorija, auto-import portfolija).
 
 ---
@@ -293,6 +296,23 @@ Izmenjeni fajlovi: `scripts/run_portfolio_review.py` (+`_parse_number`, 3 putanj
 **Verifikacija:** `tests/test_markdown_formatter.py` — **23/23 PASS**, koristi *stvarni* `compute_technicals()` + `compute_entry_exit()` izlaz (hvata budući schema drift), uključujući kratku istoriju (60 redova) gde `above_sma200` mora biti "N/A", ne "Below". #12 regresija i dalje 22/22. Pokretanje: `.venv/bin/python tests/test_markdown_formatter.py`.
 
 Izmenjeni fajlovi: `scripts/data_cache.py` (+4 adaptera/helpera, ~10 sekcija formatera), `tests/test_markdown_formatter.py` (nov).
+
+### ✅ Bugovi #6 / #7 / #6a — `sec_edgar_filings` cleanup + izmeštanje (opcija b) (2026-07-18)
+
+**Rešenje (opcija b — funkcija čista/spremna, ali NE ožičena u workflow):**
+- Obrisani mrtvi pozivi `r`, `r2` → funkcija sada pravi **2 HTTP poziva umesto 4** (a posle prvog, ticker mapa je keširana → svaki naredni tiker = 1 poziv).
+- `_sec_user_agent()` — čita `apis.sec_edgar.user_agent_email` (+`SEC_EDGAR_USER_AGENT_EMAIL` env), sa `(... or "").strip()` (ne pada na `null`); **baca `ValueError`** ako kontakt nije podešen (bez placeholder-a — SEC je fallback, `call_with_fallback` samo pređe dalje).
+- `_sec_ticker_map()` sa `@lru_cache(maxsize=1)` — rešava amplifikaciju preuzimanja `company_tickers.json` (~1MB) pri korelisanom yfinance padu (npr. portfolio od 20 pozicija).
+- Pravi `document_url` (`edgar/data/{int(cik)}/{accession_bez_crtica}/{primaryDocument}`) + čuva `primary_document`, uz guard na dužine paralelnih nizova.
+- **Izmešten iz `fundamentals`** (`get_fetchers` + `FALLBACK_CHAINS`) u novu **`filings`** kategoriju → prestaje maskiranje finnhub/fmp i lažna atribucija. `fundamentals` lanac je sad `[yfinance, finnhub, fmp]`.
+
+**Korekcija ranije tvrdnje:** EFTS endpoint `efts.sec.gov/LATEST/search-index` **postoji** (backend EDGAR FTS-a) — ranije netačno nazvan "nepostojećim". Bitno je samo da je rezultat bio neiskorišćen.
+
+**Nije rađeno (svesno, opcija b):** ožičavanje `filings` u `run_deep_dive`, `is_api_available → NEEDS CONTACT`, i finnhub/fmp fundamentals normalizacija — sve prebačeno u zasebne zadatke (vidi Preporučen redosled).
+
+**Verifikacija:** `tests/test_sec_edgar.py` — **14/14 PASS** (mock, bez mreže): 2-poziva-umesto-4 + keširanje, UA nosi konfigurisan email, missing/`null` email → `ValueError` bez HTTP poziva, `document_url` konstrukcija, i registarsko ožičenje (`sec_edgar` van `fundamentals`, u `filings`). Regresije #12 (22/22) i #13 (23/23) prolaze.
+
+Izmenjeni fajlovi: `scripts/data_fetchers.py` (+`_sec_user_agent`/`_sec_ticker_map`, rewrite `sec_edgar_filings`, `get_fetchers`), `scripts/api_config.py` (`FALLBACK_CHAINS`), `tests/test_sec_edgar.py` (nov).
 
 ---
 

@@ -14,6 +14,7 @@ Usage:
 """
 import os, sys, json
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 _project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if _project_root not in sys.path:
@@ -255,40 +256,72 @@ def yfinance_fundamentals(ticker):
     }
 
 
-def sec_edgar_filings(ticker):
-    """Get recent SEC filings for a company."""
+def _sec_user_agent():
+    """Build the User-Agent SEC EDGAR requires (must carry a real contact email).
+
+    Reads apis.sec_edgar.user_agent_email from the config, then the
+    SEC_EDGAR_USER_AGENT_EMAIL env var. Raises ValueError if neither is set —
+    a placeholder defeats the whole purpose of the declaration, and since SEC
+    is a fallback provider call_with_fallback() will just log and move on.
+    """
+    email = ""
+    try:
+        from scripts.api_config import load_config
+        cfg = load_config()
+        # `or ""` guards against a null value (key present, value None)
+        email = ((cfg.get("apis", {}).get("sec_edgar", {}) or {}).get("user_agent_email") or "").strip()
+    except Exception:
+        # A broken/unreadable config should surface, not be silently swallowed.
+        email = ""
+    email = email or os.environ.get("SEC_EDGAR_USER_AGENT_EMAIL", "").strip()
+    if not email:
+        raise ValueError(
+            "SEC EDGAR contact email not configured. Set apis.sec_edgar.user_agent_email "
+            "in ~/.financial-analysis/api_keys.json (or the SEC_EDGAR_USER_AGENT_EMAIL env "
+            "var). SEC requires a real contact in the User-Agent header."
+        )
+    return f"financial-analysis-skill {email}"
+
+
+@lru_cache(maxsize=1)
+def _sec_ticker_map(user_agent):
+    """Fetch and cache SEC's ticker→CIK map (company_tickers.json is ~1MB).
+
+    Cached for the process so a correlated yfinance outage across a whole
+    portfolio doesn't re-download it once per position. Keyed on user_agent so
+    a config change busts the cache. Exceptions are not cached, so a transient
+    network failure is retried on the next call.
+    """
     import requests
-    # First get CIK from ticker
     r = requests.get(
-        "https://efts.sec.gov/LATEST/search-index?q=%22" + ticker + "%22&dateRange=custom&startdt=2020-01-01&forms=10-K,10-Q",
-        headers={"User-Agent": "FinancialAnalysisSkill contact@example.com"},
-        timeout=10,
-    )
-    # Use the ticker-to-CIK mapping
-    r2 = requests.get(
-        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=&CIK=" + ticker + "&type=10-K&dateb=&owner=include&count=5&search_text=&action=getcompany",
-        headers={"User-Agent": "FinancialAnalysisSkill contact@example.com"},
-        timeout=10,
-    )
-    # Simpler approach: use the company tickers JSON
-    tickers_r = requests.get(
         "https://www.sec.gov/files/company_tickers.json",
-        headers={"User-Agent": "FinancialAnalysisSkill contact@example.com"},
+        headers={"User-Agent": user_agent},
         timeout=10,
     )
-    tickers_r.raise_for_status()
-    tickers_data = tickers_r.json()
-    cik = None
-    for entry in tickers_data.values():
-        if entry.get("ticker", "").upper() == ticker.upper():
-            cik = str(entry["cik_str"]).zfill(10)
-            break
+    r.raise_for_status()
+    data = r.json()
+    return {e.get("ticker", "").upper(): str(e["cik_str"]).zfill(10)
+            for e in data.values() if e.get("ticker")}
+
+
+def sec_edgar_filings(ticker):
+    """Get recent SEC filings metadata for a company from EDGAR.
+
+    NOTE: returns filing metadata (form / date / accession / document URL),
+    NOT financial statements. Registered under the 'filings' category, not
+    'fundamentals' — it must never masquerade as a fundamentals source.
+    """
+    import requests
+    ua = _sec_user_agent()  # raises if no contact email is configured
+    headers = {"User-Agent": ua}
+
+    cik = _sec_ticker_map(ua).get(ticker.upper())
     if not cik:
         raise ValueError(f"CIK not found for {ticker}")
-    # Get submissions
+
     sub_r = requests.get(
         f"https://data.sec.gov/submissions/CIK{cik}.json",
-        headers={"User-Agent": "FinancialAnalysisSkill contact@example.com"},
+        headers=headers,
         timeout=10,
     )
     sub_r.raise_for_status()
@@ -296,14 +329,27 @@ def sec_edgar_filings(ticker):
     recent = data.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
     dates = recent.get("filingDate", [])
-    urls = recent.get("primaryDocument", [])
+    docs = recent.get("primaryDocument", [])
     accessions = recent.get("accessionNumber", [])
+
+    cik_int = int(cik)  # Archives path uses the CIK without leading zeros
     filings = []
     for i in range(min(20, len(forms))):
+        accession = accessions[i] if i < len(accessions) else ""
+        primary_document = docs[i] if i < len(docs) else ""
+        # primaryDocument is only a filename; build the full archive URL.
+        document_url = ""
+        if accession and primary_document:
+            document_url = (
+                f"https://www.sec.gov/Archives/edgar/data/"
+                f"{cik_int}/{accession.replace('-', '')}/{primary_document}"
+            )
         filings.append({
             "form": forms[i],
-            "date": dates[i],
-            "accession": accessions[i] if i < len(accessions) else "",
+            "date": dates[i] if i < len(dates) else "",
+            "accession": accession,
+            "primary_document": primary_document,
+            "document_url": document_url,
         })
     return {
         "ticker": ticker,
@@ -816,9 +862,14 @@ def get_fetchers(ticker):
         },
         "fundamentals": {
             "yfinance": lambda: yfinance_fundamentals(ticker),
-            "sec_edgar": lambda: sec_edgar_filings(ticker),
             "finnhub": lambda: finnhub_financials(ticker),
             "fmp": lambda: fmp_fundamentals(ticker),
+        },
+        # SEC filings are metadata, NOT fundamentals — kept in their own
+        # category so they can't mask the finnhub/fmp fundamentals fallbacks.
+        # No workflow consumes this category yet (wiring is a separate task).
+        "filings": {
+            "sec_edgar": lambda: sec_edgar_filings(ticker),
         },
         "analyst_ratings": {
             "finnhub": lambda: finnhub_analyst_ratings(ticker),
