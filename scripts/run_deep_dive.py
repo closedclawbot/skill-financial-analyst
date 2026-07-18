@@ -24,7 +24,7 @@ if _project_root not in sys.path:
 
 from scripts.api_caller import call_api, call_with_fallback
 from scripts.api_config import load_config
-from scripts.data_fetchers import get_fetchers, tradingview_consensus
+from scripts.data_fetchers import get_fetchers, tradingview_consensus, _is_finnhub_redirect
 from scripts.technical_analysis import compute_technicals
 from scripts.scoring import compute_composite_score, score_to_rating, score_to_portfolio_action
 from scripts.entry_exit import compute_entry_exit, format_entry_exit
@@ -540,11 +540,17 @@ def _collect_articles(ticker, news_data, rss_articles):
             if not title or title.lower() in seen_titles:
                 continue
             seen_titles.add(title.lower())
+            # Defensive: older cached Finnhub responses may still carry the dead
+            # homepage-redirect url (now blanked at the source). Drop it here too
+            # so a stale cache never shows a broken link. See bug #23.
+            fh_link = a.get("url", "")
+            if _is_finnhub_redirect(fh_link):
+                fh_link = ""
             articles.append({
                 "source": a.get("source", "Finnhub News"),
                 "title": title,
                 "summary": (a.get("summary", "") or "")[:300],
-                "link": a.get("url", ""),
+                "link": fh_link,
                 "published": a.get("datetime", ""),
                 "sentiment": None,
                 "priority": 3,

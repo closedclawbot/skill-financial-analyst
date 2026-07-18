@@ -42,6 +42,24 @@ def _de_ratio(de):
     return None if de is None else de / 100.0
 
 
+def _fmt_money(v):
+    """Format a dollar amount with the sign OUTSIDE the '$' and an adaptive
+    B/M/K scale, so small negatives read correctly (−$5M → '-$5.00M', never the
+    old '$-0.00B' which both mis-placed the sign and rounded the magnitude to
+    zero). None-safe. See bug #22a."""
+    if v is None:
+        return None
+    sign = "-" if v < 0 else ""
+    av = abs(float(v))
+    if av >= 1e9:
+        return f"{sign}${av / 1e9:.2f}B"
+    if av >= 1e6:
+        return f"{sign}${av / 1e6:.2f}M"
+    if av >= 1e3:
+        return f"{sign}${av / 1e3:.2f}K"
+    return f"{sign}${av:.0f}"
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  RATING THRESHOLDS
 # ═══════════════════════════════════════════════════════════════════
@@ -237,7 +255,15 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
         else:
             s, rn = 1, "Deep losses — unsustainable without capital"
         scores.append(s)
-        details["profit_margin"] = {"value": round(pct, 1), "score": s, "rating_note": rn}
+        val = round(pct, 1)
+        if val == 0 and pct != 0:
+            # A nonzero margin that would render as "0.0%" contradicts a note like
+            # "Negative margins — losing money". The console/portfolio printers apply
+            # f"{value:.1f}%" only to FLOATS, so emit a pre-formatted string with
+            # adaptive (2 significant figures) precision that keeps the sign and a
+            # nonzero digit (−0.03 → "-0.03%"), bypassing both formatters. See #22b.
+            val = f"{pct:.2g}%"
+        details["profit_margin"] = {"value": val, "score": s, "rating_note": rn}
     else:
         scores.append(5)
         details["profit_margin"] = {"value": None, "score": 5, "note": "No data", "rating_note": "No data available"}
@@ -285,7 +311,7 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
         else:
             s, rn = 2, "Negative FCF — burning cash"
         scores.append(s)
-        details["free_cash_flow"] = {"value": f"${fcf_b:.2f}B", "score": s, "rating_note": rn}
+        details["free_cash_flow"] = {"value": _fmt_money(fcf), "score": s, "rating_note": rn}
     else:
         scores.append(5)
         details["free_cash_flow"] = {"value": None, "score": 5, "note": "No data", "rating_note": "No data available"}

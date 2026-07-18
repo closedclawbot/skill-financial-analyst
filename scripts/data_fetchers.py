@@ -614,6 +614,24 @@ def mboum_congress_trades(ticker=None):
 #  NEWS & SENTIMENT
 # ═══════════════════════════════════════════════════════════════════
 
+def _is_finnhub_redirect(url):
+    """True if `url` is a Finnhub news-redirect link. Finnhub's free-tier
+    company-news `url` is `https://finnhub.io/api/news?id=...`, which 302s to the
+    finnhub HOMEPAGE (`location: /`), NOT the source article — verified live, with
+    and without a token, for fresh and stale ids. Such a link is dead, so we drop
+    it rather than present it. Matches the exact host + `/api/news` path (parsed),
+    not an arbitrary substring. See bug #23."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+    except (ValueError, TypeError):
+        return False
+    host = (p.netloc or "").lower()
+    return (host == "finnhub.io" or host.endswith(".finnhub.io")) and p.path.startswith("/api/news")
+
+
 def finnhub_news_sentiment(ticker):
     """Get company news from Finnhub."""
     import requests
@@ -630,6 +648,11 @@ def finnhub_news_sentiment(ticker):
     articles = r.json()
     if not articles:
         return {"ticker": ticker, "articles": [], "avg_sentiment": 0, "article_count": 0}
+    # Finnhub's free-tier `url` is a dead homepage redirect (#23) — blank it at the
+    # source so the cache and every consumer get a clean (linkless) article.
+    for a in articles[:20]:
+        if isinstance(a, dict) and _is_finnhub_redirect(a.get("url")):
+            a["url"] = ""
     # Finnhub doesn't provide sentiment scores in free tier, but we get headlines
     return {
         "ticker": ticker,

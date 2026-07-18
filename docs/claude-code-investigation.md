@@ -69,8 +69,8 @@ Zajednički koren više bugova je **yfinance dvosmislenost "frakcija vs procenat
 | 19 | `scoring.py` | 🔴 | Negativan P/B (`pb < 1`) boduje se 9/10 "deep value" | Negative-equity firma (FGMC −2075) dobija max fundamental — **✅ ISPRAVLJENO** |
 | 20 | `scoring.py` | 🟡 | ROE bez gornjeg sanity capa (`>30 → 9/10`) | 1028% (artefakt negativnog imenioca) → 9/10 — **✅ ISPRAVLJENO** |
 | 21 | `scoring.py` / `data_fetchers.py` | 🟡 | Nema SPAC / de-SPAC / insufficient-history detekcije | Fundamentals (PE/PB/ROE/margine) besmisleni za tek-spojene entitete |
-| 22 | `data_cache.py` / `scoring.py` | ⚪ | FCF `-0.00B` + margin `0.0%` uz "negative" label | Prikaz/prag ivičnih vrednosti nedosledni |
-| 23 | `run_deep_dive.py` | ⚪ | News link je Finnhub redirect (`finnhub.io/api/news?id=`), ne izvorni URL | Indirektni/ružni linkovi u KEY ARTICLES |
+| 22 | `scoring.py` | ⚪ | FCF `$-0.00B` + margin `0.0%` uz "negative" label | Prikaz ivičnih vrednosti — **✅ ISPRAVLJENO** |
+| 23 | `data_fetchers.py` / `run_deep_dive.py` | 🟡 | Finnhub news `url` = mrtav redirect (302 → homepage), ne izvorni članak | Korisniku prikazan link koji ne radi — **✅ ISPRAVLJENO** |
 
 Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 
@@ -471,6 +471,24 @@ Izmenjeni fajlovi: `requirements.txt`, `scripts/data_fetchers.py` (module-docstr
 **Verifikacija:** `tests/test_distressed_denominator.py` — **15/15 PASS** (neg P/B→2, poz P/B nepromenjen, neg-equity ROE→5, AAPL poz-equity ROE→9, `pb=None`→postojeće, **aritmetika pinovana: FGMC fundamental 4.6→3.5**). Pun regresioni prolaz — **15/15 fajlova zeleno** (uklj. `fundamental_units` 18/18 gde AAPL/NVDA ROE ostaju 9), nula padova.
 
 Izmenjeni fajlovi: `scripts/scoring.py` (P/B + ROE blok u `_score_fundamental`), `tests/test_distressed_denominator.py` (nov).
+
+### ✅ Bugovi #22 / #23 — Formatiranje ivičnih vrednosti + mrtav Finnhub news link (2026-07-18)
+
+Oba otkrivena na `run_deep_dive.py FGMC` (de-SPAC). #23 se pri proveri pokazao gori nego što je izgledao (⚪→🟡).
+
+**#22a FCF `$-0.00B`** (`scoring.py`): `f"${fcf/1e9:.2f}B"` je mali negativan FCF (−$5M) prikazivao kao `$-0.00B` (znak unutar `$` + magnituda zaokružena na nulu). **Rešenje:** lokalni `_fmt_money(v)` — znak PRE `$` + adaptivna B/M/K skala → `-$5.00M`.
+
+**#22b Profit Margin `0.0%` uz "Negative margins — losing money"** (`scoring.py`): sićušno negativna margina (−0.03%) → `round(pct,1) = -0.0` → prikaz `0.0%` (izgleda breakeven) dok note kaže gubitak. **Ključno (Codex nalaz):** oba printera (`run_deep_dive`, `run_portfolio_review`) rade `f"{value:.1f}%"` SAMO na float — pa fix mora u finalni prikaz, ne u `details`. **Rešenje:** kad `round(pct,1)==0 a pct!=0` → scoring upiše adaptivan string `f"{pct:.2g}%"` (`-0.03%`), koji zaobilazi oba `.1f` formatera. Score pragovi netaknuti (behavior-preserving).
+
+**#23 Finnhub news `url` = mrtav link** (`data_fetchers.py`/`run_deep_dive.py`): free-tier `company-news` `url` = `finnhub.io/api/news?id=...` → **provereno uživo** `302 location:/` (homepage), sa/bez tokena, svež/star id → nikad ne vodi na izvor; u odgovoru nema drugog URL polja. **Rešenje:** `_is_finnhub_redirect(url)` (`urllib.parse`, exact host + `/api/news` path) → sanitizacija na izvoru (`finnhub_news_sentiment` briše `url`) + defanzivni filter u `_collect_articles` (star cache); formater prikaže naslov+izvor bez lažnog linka. AV `url` i RSS `link` netaknuti.
+
+**Codex CLI review** (log: `docs/codex-review/22-23-display-and-news-url.md`, 4 poruke): **CHANGES_REQUIRED → AGREED**. Codex-ove korekcije (verifikovane pre prihvatanja): #22b mora testirati krajnji prikaz jer printer re-formatira `.1f` (ključno); #23 exact host+path (ne substring) + izvor i star-cache put + AV/RSS netaknuti; drop link, ne oznaka. Severity **#22 ⚪, #23 🟡**.
+
+**Usputni nalaz (van obima, dokumentovan, NE popravljen):** `margin = profit_margin or operating_margin` tretira tačnu `0.0` maržu kao falsy → "nema podataka" (`—`). Pre-postojeći quirk.
+
+**Verifikacija:** `tests/test_display_and_news.py` — **25/25 PASS** (test replicira tačan printer-branch i tvrdi finalni prikaz; `_fmt_money` skale; `_is_finnhub_redirect` uklj. look-alike host; `_collect_articles` nov+star put, AV/RSS netaknuti). Pun regresioni prolaz — **16/16 fajlova zeleno**, nula padova.
+
+Izmenjeni fajlovi: `scripts/scoring.py` (`_fmt_money` + FCF/margin), `scripts/data_fetchers.py` (`_is_finnhub_redirect` + `finnhub_news_sentiment`), `scripts/run_deep_dive.py` (defanzivni filter + import), `tests/test_display_and_news.py` (nov).
 
 ---
 
