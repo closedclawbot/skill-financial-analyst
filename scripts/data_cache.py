@@ -624,7 +624,8 @@ def _format_markdown(ticker, day, data, config_status=None):
         _h(f"## Dividends")
         _h(f"")
         if isinstance(divs, dict):
-            _h(f"- Dividend Yield: {_fmt_pct(divs.get('dividend_yield'))}")
+            # dividendYield is already a percent (do NOT ×100); payoutRatio is a fraction.
+            _h(f"- Dividend Yield: {_fmt_pct_value(divs.get('dividend_yield'))}")
             _h(f"- Payout Ratio: {_fmt_pct(divs.get('payout_ratio'))}")
             _h(f"- Annual Dividend: {_safe_num(divs.get('annual_dividend', divs.get('dividend_rate')), '$')}")
             _h(f"- Ex-Dividend Date: {divs.get('ex_dividend_date', 'N/A')}")
@@ -878,17 +879,31 @@ def _safe_num(val, fmt=None):
     return f"{val:.2f}" if abs(val) < 100 else f"{val:,.2f}"
 
 
-def _fmt_pct(val):
-    """Format a percentage value."""
+def _fmt_pct(frac):
+    """Format a yfinance FRACTION as a percent (0.166 → '16.6%').
+
+    No magnitude guessing — every caller here passes a fraction (revenueGrowth,
+    earningsGrowth, profit/operatingMargins, ROE, ROA, payoutRatio). The old
+    `abs<1 → *100` heuristic mis-scaled both already-percent fields (dividendYield)
+    and values ≥ 1 (ROE > 100%, payout > 100%). See bug #14 and #1/#2.
+    """
+    if frac is None:
+        return "N/A"
+    try:
+        return f"{float(frac) * 100:.2f}%"
+    except (ValueError, TypeError):
+        return str(frac)
+
+
+def _fmt_pct_value(val):
+    """Format a value that is ALREADY a percent, unscaled (yfinance
+    `dividendYield` is percent-valued now: KO 2.6 → '2.60%', AAPL 0.32 → '0.32%')."""
     if val is None:
         return "N/A"
     try:
-        pct = float(val)
+        return f"{float(val):.2f}%"
     except (ValueError, TypeError):
         return str(val)
-    if abs(pct) < 1:
-        pct *= 100
-    return f"{pct:.2f}%"
 
 
 def _fmt_large_num(val):

@@ -587,10 +587,12 @@ def test_analyst_line_parser():
         all_ok = False
     print(f"  {status} Finnhub:        {line_fh}")
 
-    # ── yfinance (single latest recommendation) ──
-    yf_data = {"ticker": "ET", "firm": "Morgan Stanley", "grade": "Overweight", "action": "Upgrade", "total_recommendations": 28}
+    # ── yfinance (modern schema: aggregated recommendation counts, bug #8) ──
+    yf_data = {"ticker": "ET", "buy": 23, "hold": 15, "sell": 2,
+               "strong_buy": 6, "strong_sell": 1, "period": "0m", "num_analysts": 47}
     line_yf = _format_analyst_line("yfinance", yf_data)
-    test_yf = "Morgan Stanley" in line_yf and "Overweight" in line_yf and "28" in line_yf
+    # buy=23+6=29, hold=15, sell=2+1=3
+    test_yf = "29 Buy" in line_yf and "15 Hold" in line_yf and "3 Sell" in line_yf
     # Must NOT contain raw dict characters like "{'ticker'"
     test_yf2 = "{" not in line_yf
     status = "✓" if (test_yf and test_yf2) else "✗"
@@ -629,10 +631,10 @@ def test_analyst_line_parser():
         all_ok = False
     print(f"  {status} Seeking Alpha:  {line_sa}")
 
-    # ── yfinance with empty firm (edge case from user's output) ──
-    yf_empty = {"ticker": "ET", "firm": "", "grade": "", "action": "", "total_recommendations": 4}
+    # ── yfinance with no counts (edge case: total 0 → clean message) ──
+    yf_empty = {"ticker": "ET", "buy": 0, "hold": 0, "sell": 0, "strong_buy": 0, "strong_sell": 0}
     line_yf_e = _format_analyst_line("yfinance", yf_empty)
-    test_yfe = "{" not in line_yf_e and "4" in line_yf_e
+    test_yfe = "{" not in line_yf_e and "No analyst data" in line_yf_e
     status = "✓" if test_yfe else "✗"
     if not test_yfe:
         all_ok = False

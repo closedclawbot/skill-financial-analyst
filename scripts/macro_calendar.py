@@ -166,147 +166,208 @@ def get_earnings_calendar(tickers):
 #  ECONOMIC EVENTS
 # ═══════════════════════════════════════════════════════════════════════
 
-def get_economic_events(days_ahead=14):
-    """
-    Get upcoming economic events within the specified window.
+# Hardcoded fallback categories: (key, dates, name, impact, description, affects).
+# Dates are APPROXIMATE and go stale — Stage 2 replaces them with live official
+# sources (BLS ICS, Fed, OPEX holiday-aware generator). Do NOT hand-patch dates.
+_HARDCODED_SPECS = [
+    ("FOMC", FOMC_DATES, "FOMC Rate Decision", "HIGH",
+     "Federal Reserve interest rate decision and economic projections",
+     "All sectors — especially REITs, banks, growth stocks"),
+    ("CPI", CPI_DATES, "CPI Report", "HIGH",
+     "Consumer Price Index — key inflation measure",
+     "Rate-sensitive sectors, growth vs value rotation"),
+    ("JOBS", JOBS_DATES, "Jobs Report (NFP)", "HIGH",
+     "Non-Farm Payrolls — labor market health",
+     "Consumer discretionary, industrials, broad market sentiment"),
+    ("OPEX", OPEX_DATES, "Triple Witching (OPEX)", "MEDIUM",
+     "Index futures, index options, stock options all expire — high volume day",
+     "Elevated volatility, especially last 2 hours of trading"),
+]
 
-    Returns: list of {event, date, days_until, impact}
+# Categories Finnhub's economic calendar authoritatively covers (NOT OPEX,
+# which is a market-structure event Finnhub doesn't track).
+_FINNHUB_MACRO_CATEGORIES = {"FOMC", "CPI", "JOBS"}
+
+_IMPACT_MAP = {"low": 1, "medium": 2, "high": 3}
+
+
+def _impact_to_num(v):
+    """Finnhub documents impact as text (low/medium/high); tolerate numbers too."""
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        return _IMPACT_MAP.get(v.strip().lower(), 0)
+    return 0
+
+
+def _classify_http(status):
+    """Map an HTTP status to an actionable error class (not all failures are premium)."""
+    if status == 401:
+        return "auth"          # invalid key
+    if status == 403:
+        return "premium"       # missing entitlement (economic calendar is paid)
+    if status == 429:
+        return "rate_limit"
+    return "provider"          # 5xx / anything else
+
+
+def _hardcoded_events(days_ahead):
+    """Build fallback events tagged APPROXIMATE, plus per-category coverage_end."""
+    today = date.today()
+    cutoff = today + timedelta(days=days_ahead)
+    events, coverage_end = [], {}
+    for cat, dates, name, impact, desc, affects in _HARDCODED_SPECS:
+        parsed = sorted(d for d in (_parse_date(x) for x in dates) if d)
+        coverage_end[cat] = parsed[-1].isoformat() if parsed else None
+        for dt in parsed:
+            if today <= dt <= cutoff:
+                events.append({
+                    "event": name, "category": cat, "date": dt.isoformat(),
+                    "days_until": (dt - today).days, "impact": impact,
+                    "description": desc, "affects": affects,
+                    "source": "hardcoded_fallback", "date_confidence": "APPROXIMATE",
+                })
+    return events, coverage_end
+
+
+def _fetch_finnhub_calendar(days_ahead=14, config=None):
+    """Fetch US economic events from Finnhub's economic calendar (PREMIUM endpoint).
+
+    Returns a STRUCTURED status dict — not a bare list — so callers can tell
+    "covered, no events" from auth/premium/rate-limit/network failure:
+        {attempted, success, http_status, error_class, events, coverage_start/end}
+    """
+    from scripts.api_config import get_api_key
+    today = date.today()
+    cutoff = today + timedelta(days=days_ahead)
+    result = {"attempted": False, "success": False, "http_status": None,
+              "error_class": None, "events": [],
+              "coverage_start": today.isoformat(), "coverage_end": None}
+
+    key = get_api_key("finnhub", config)
+    if not key:
+        return result  # no key → not attempted (not an error, not premium)
+
+    result["attempted"] = True
+    try:
+        import requests
+        r = requests.get(
+            "https://finnhub.io/api/v1/calendar/economic",
+            params={"from": today.isoformat(), "to": cutoff.isoformat(), "token": key},
+            timeout=10,
+        )
+        result["http_status"] = r.status_code
+        if r.status_code != 200:
+            result["error_class"] = _classify_http(r.status_code)
+            return result
+        data = r.json()
+        for item in data.get("economicCalendar", []):
+            if str(item.get("country", "")).strip().upper() not in ("US", "USA", "UNITED STATES"):
+                continue
+            imp = _impact_to_num(item.get("impact", 0))
+            if imp < 2:  # skip low-impact
+                continue
+            dt = _parse_date(item.get("time", item.get("date", "")))
+            if not dt or not (today <= dt <= cutoff):
+                continue
+            result["events"].append({
+                "event": item.get("event", "Economic Event"),
+                "category": "FINNHUB", "date": dt.isoformat(),
+                "days_until": (dt - today).days,
+                "impact": "HIGH" if imp >= 3 else "MEDIUM",
+                "description": f"Prev: {item.get('prev', 'N/A')} | Est: {item.get('estimate', 'N/A')}",
+                "affects": "US", "source": "finnhub", "date_confidence": "SCHEDULED",
+            })
+        result["success"] = True
+        # A successful 200 covers the whole queried window (even with 0 events).
+        result["coverage_end"] = cutoff.isoformat()
+    except Exception:
+        result["error_class"] = "network"
+    return result
+
+
+def get_economic_events(days_ahead=14, config=None):
+    """
+    Upcoming US economic events with source precedence and coverage tracking.
+
+    Live source (Finnhub, if entitled) takes precedence over the approximate
+    hardcoded fallback FOR THE CATEGORIES IT COVERS (FOMC/CPI/JOBS) — so a
+    revised live CPI date replaces the wrong fallback date rather than both
+    appearing. OPEX is not covered by Finnhub, so it stays from the fallback.
+
+    Returns a dict: {events, query_start, query_end, coverage_complete,
+                     coverage_warnings, source_status}.
     """
     today = date.today()
     cutoff = today + timedelta(days=days_ahead)
+    hard_events, hard_cov = _hardcoded_events(days_ahead)
+    fh = _fetch_finnhub_calendar(days_ahead, config)
+
     events = []
+    effective_cov = dict(hard_cov)  # per-category coverage end
+    if fh["success"]:
+        # Finnhub authoritatively covers US macro for the window → suppress the
+        # fallback macro events entirely, keep only categories it doesn't cover.
+        events.extend(fh["events"])
+        for cat in _FINNHUB_MACRO_CATEGORIES:
+            effective_cov[cat] = fh["coverage_end"]
+        events.extend(e for e in hard_events if e["category"] not in _FINNHUB_MACRO_CATEGORIES)
+    else:
+        events.extend(hard_events)
 
-    # FOMC
-    for d in FOMC_DATES:
-        dt = _parse_date(d)
-        if dt and today <= dt <= cutoff:
-            days = (dt - today).days
-            events.append({
-                "event": "FOMC Rate Decision",
-                "date": dt.isoformat(),
-                "days_until": days,
-                "impact": "HIGH",
-                "description": "Federal Reserve interest rate decision and economic projections",
-                "affects": "All sectors — especially REITs, banks, growth stocks",
-            })
+    # Exact dedup only AFTER precedence (by event name + date).
+    seen, deduped = set(), []
+    for e in sorted(events, key=lambda x: x.get("days_until", 999)):
+        k = (e.get("event"), e.get("date"))
+        if k not in seen:
+            seen.add(k)
+            deduped.append(e)
 
-    # CPI
-    for d in CPI_DATES:
-        dt = _parse_date(d)
-        if dt and today <= dt <= cutoff:
-            days = (dt - today).days
-            events.append({
-                "event": "CPI Report",
-                "date": dt.isoformat(),
-                "days_until": days,
-                "impact": "HIGH",
-                "description": "Consumer Price Index — key inflation measure",
-                "affects": "Rate-sensitive sectors, growth vs value rotation",
-            })
-
-    # Jobs
-    for d in JOBS_DATES:
-        dt = _parse_date(d)
-        if dt and today <= dt <= cutoff:
-            days = (dt - today).days
-            events.append({
-                "event": "Jobs Report (NFP)",
-                "date": dt.isoformat(),
-                "days_until": days,
-                "impact": "HIGH",
-                "description": "Non-Farm Payrolls — labor market health",
-                "affects": "Consumer discretionary, industrials, broad market sentiment",
-            })
-
-    # Options expiration
-    for d in OPEX_DATES:
-        dt = _parse_date(d)
-        if dt and today <= dt <= cutoff:
-            days = (dt - today).days
-            events.append({
-                "event": "Triple Witching (OPEX)",
-                "date": dt.isoformat(),
-                "days_until": days,
-                "impact": "MEDIUM",
-                "description": "Index futures, index options, stock options all expire — high volume day",
-                "affects": "Elevated volatility, especially last 2 hours of trading",
-            })
-
-    # Try Finnhub for additional events
-    try:
-        fh_events = _fetch_finnhub_calendar(days_ahead)
-        events.extend(fh_events)
-    except Exception:
-        pass
-
-    return sorted(events, key=lambda x: x.get("days_until", 999))
-
-
-def _fetch_finnhub_calendar(days_ahead=14):
-    """Fetch economic calendar from Finnhub (free tier)."""
-    events = []
-    try:
-        from scripts.api_config import load_config
-        config = load_config()
-        key = config.get("api_keys", {}).get("finnhub")
-        if not key:
-            return events
-
-        import requests
-        today = date.today()
-        end = today + timedelta(days=days_ahead)
-
-        r = requests.get(
-            "https://finnhub.io/api/v1/calendar/economic",
-            params={
-                "from": today.isoformat(),
-                "to": end.isoformat(),
-                "token": key,
-            },
-            timeout=10,
+    # Coverage: complete only if EVERY category reaches the cutoff.
+    incomplete = [cat for cat, cov in effective_cov.items()
+                  if cov is None or _parse_date(cov) < cutoff]
+    warnings = []
+    if incomplete:
+        last = min((effective_cov[c] for c in incomplete if effective_cov[c]), default="unknown")
+        warnings.append(
+            f"Economic calendar coverage incomplete through {cutoff.isoformat()} "
+            f"(short: {', '.join(sorted(incomplete))}; fallback ends ~{last}). "
+            f"Update Stage-2 live sources (BLS/Fed)."
         )
-        if r.status_code == 200:
-            data = r.json()
-            for item in data.get("economicCalendar", []):
-                impact = item.get("impact", 0)
-                if impact < 2:  # skip low-impact events
-                    continue
-                dt = _parse_date(item.get("time", item.get("date", "")))
-                if not dt:
-                    continue
-                events.append({
-                    "event": item.get("event", "Economic Event"),
-                    "date": dt.isoformat(),
-                    "days_until": (dt - today).days,
-                    "impact": "HIGH" if impact >= 3 else "MEDIUM",
-                    "description": f"Country: {item.get('country', 'US')} | "
-                                   f"Previous: {item.get('prev', 'N/A')} | "
-                                   f"Estimate: {item.get('estimate', 'N/A')}",
-                    "affects": item.get("country", "US"),
-                    "source": "finnhub",
-                })
-    except Exception:
-        pass
 
-    return events
+    return {
+        "events": deduped,
+        "query_start": today.isoformat(),
+        "query_end": cutoff.isoformat(),
+        "coverage_complete": not incomplete,
+        "coverage_warnings": warnings,
+        "source_status": {
+            "finnhub": {k: fh[k] for k in ("attempted", "success", "http_status",
+                                            "error_class", "coverage_start", "coverage_end")},
+            "hardcoded_fallback": {"coverage_end": hard_cov},
+        },
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  MACRO SUMMARY (for portfolio review header)
 # ═══════════════════════════════════════════════════════════════════════
 
-def get_macro_summary(tickers=None, days_ahead=14):
+def get_macro_summary(tickers=None, days_ahead=14, config=None):
     """
     Build a complete macro summary for the portfolio review.
 
-    Returns:
-        dict with earnings_calendar, economic_events, risk_flags
+    Returns dict with earnings_calendar, economic_events (list), risk_flags,
+    plus calendar coverage/observability fields (coverage_complete,
+    coverage_warnings, calendar_source_status).
     """
     tickers = tickers or []
     earnings = get_earnings_calendar(tickers) if tickers else []
-    events = get_economic_events(days_ahead)
+    eco = get_economic_events(days_ahead, config)
+    events = eco["events"]
 
-    # Generate risk flags
     risk_flags = []
 
     # Imminent earnings
@@ -314,8 +375,7 @@ def get_macro_summary(tickers=None, days_ahead=14):
     if imminent:
         tickers_str = ", ".join(e["ticker"] for e in imminent)
         risk_flags.append({
-            "flag": "EARNINGS_IMMINENT",
-            "severity": "HIGH",
+            "flag": "EARNINGS_IMMINENT", "severity": "HIGH",
             "message": f"Earnings within 3 days: {tickers_str} — expect volatility, review position sizing",
         })
 
@@ -323,24 +383,39 @@ def get_macro_summary(tickers=None, days_ahead=14):
     if upcoming:
         tickers_str = ", ".join(f"{e['ticker']} ({e['days_until']}d)" for e in upcoming)
         risk_flags.append({
-            "flag": "EARNINGS_UPCOMING",
-            "severity": "MEDIUM",
+            "flag": "EARNINGS_UPCOMING", "severity": "MEDIUM",
             "message": f"Earnings within 14 days: {tickers_str}",
         })
 
-    # High-impact economic events
-    high_events = [e for e in events if e.get("impact") == "HIGH" and e.get("days_until", 99) <= 5]
-    if high_events:
-        for ev in high_events:
-            risk_flags.append({
-                "flag": "MACRO_EVENT",
-                "severity": "HIGH",
-                "message": f"{ev['event']} in {ev['days_until']} day(s) ({ev['date']}) — {ev.get('affects', '')}",
-            })
+    # High-impact economic events (flag approximate fallback dates honestly)
+    for ev in [e for e in events if e.get("impact") == "HIGH" and e.get("days_until", 99) <= 5]:
+        approx = (" — approximate fallback date; live calendar unavailable"
+                  if ev.get("date_confidence") == "APPROXIMATE" else "")
+        risk_flags.append({
+            "flag": "MACRO_EVENT", "severity": "HIGH",
+            "message": f"{ev['event']} in {ev['days_until']} day(s) ({ev['date']}) — {ev.get('affects', '')}{approx}",
+        })
+
+    # One soft note if a live-calendar fetch was attempted and failed (macro is
+    # fetched once per summary, so this never spams).
+    fh = eco["source_status"]["finnhub"]
+    if fh.get("attempted") and not fh.get("success"):
+        note = {"premium": "requires Finnhub paid tier", "auth": "invalid Finnhub key",
+                "rate_limit": "Finnhub rate-limited", "provider": "Finnhub server error",
+                "network": "network error"}.get(fh.get("error_class"), fh.get("error_class") or "unavailable")
+        risk_flags.append({
+            "flag": "CALENDAR_SOURCE", "severity": "LOW",
+            "message": f"Live economic calendar unavailable ({note}); using approximate fallback dates.",
+        })
+    for w in eco["coverage_warnings"]:
+        risk_flags.append({"flag": "CALENDAR_COVERAGE", "severity": "LOW", "message": w})
 
     return {
         "earnings_calendar": earnings,
-        "economic_events": events,
+        "economic_events": events,                       # list (portfolio-review compat)
+        "coverage_complete": eco["coverage_complete"],
+        "coverage_warnings": eco["coverage_warnings"],
+        "calendar_source_status": eco["source_status"],
         "risk_flags": risk_flags,
         "checked_at": datetime.now().isoformat(),
     }
@@ -382,9 +457,15 @@ def format_macro_summary(summary):
         _h(f"  ECONOMIC EVENTS (next 14 days):")
         for ev in events[:8]:
             impact = ev.get("impact", "?")
-            _h(f"    [{impact}] {ev['event']} — {ev['date']} (in {ev['days_until']}d)")
+            conf = "  ~approx" if ev.get("date_confidence") == "APPROXIMATE" else ""
+            _h(f"    [{impact}] {ev['event']} — {ev['date']} (in {ev['days_until']}d){conf}")
+    elif summary.get("coverage_complete", True):
+        _h(f"  No major economic events found; calendar coverage is complete.")
     else:
-        _h(f"  No major economic events in the next 14 days.")
+        _h(f"  No events available; calendar coverage is INCOMPLETE (see warnings).")
+
+    for w in summary.get("coverage_warnings", []):
+        _h(f"  ⚠ {w}")
 
     return "\n".join(lines)
 

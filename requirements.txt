@@ -2,7 +2,12 @@
 # Compatible with Python 3.9+
 #
 # Core data fetching
-yfinance>=0.2.36
+# yfinance floor pinned to a MODERN, verified schema: the fetchers here assume
+# aggregated .recommendations (period/strongBuy/...), .earnings_history, and
+# percent-valued `dividendYield` (bugs #8/#10/#14). Older releases exposed
+# `dividendYield` as a fraction and legacy recommendation/earnings schemas —
+# the code is already incompatible with those, so the declared floor must say so.
+yfinance>=1.5.1
 requests>=2.31.0
 feedparser>=6.0.11
 

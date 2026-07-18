@@ -26,6 +26,22 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 
+# ─── yfinance unit conventions (verified live 2026-07: AAPL/NVDA/KO/O/JPM/MNST) ──
+# Rate / margin / growth fields are FRACTIONS (0.27 == 27%). `debtToEquity` is a
+# PERCENT of the ratio (79.5 == 0.795x). The old `<1`/`<5`/`>10` heuristics
+# misfired on real names: ROE > 100% (NVDA 1.14, AAPL 1.41 read as ~1%), and
+# near-zero-debt firms (NVDA D/E 6.5 read as ratio 6.5 → "extremely leveraged").
+# Fix: convert per field explicitly, never guess from magnitude.
+def _pct(frac):
+    """yfinance fraction → human percent. None-safe."""
+    return None if frac is None else frac * 100.0
+
+
+def _de_ratio(de):
+    """yfinance debtToEquity (percent of the ratio) → ratio. None-safe."""
+    return None if de is None else de / 100.0
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  RATING THRESHOLDS
 # ═══════════════════════════════════════════════════════════════════
@@ -146,7 +162,7 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     # --- 3. Revenue Growth (higher = better) ---
     rev_g = f.get("revenue_growth")
     if rev_g is not None:
-        pct = rev_g * 100 if abs(rev_g) < 5 else rev_g  # handle decimal vs pct
+        pct = _pct(rev_g)  # yfinance revenueGrowth is a fraction
         if pct > 40:
             s, rn = 10, "Hyper-growth — exceptional revenue expansion"
         elif pct > 25:
@@ -174,7 +190,7 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     # --- 4. EPS Growth (higher = better) ---
     eps_g = f.get("earnings_growth")
     if eps_g is not None:
-        pct = eps_g * 100 if abs(eps_g) < 5 else eps_g
+        pct = _pct(eps_g)  # yfinance earningsGrowth is a fraction
         if pct > 40:
             s, rn = 10, "Exceptional earnings growth"
         elif pct > 25:
@@ -200,7 +216,7 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     # --- 5. Profit Margin (higher = better quality) ---
     margin = f.get("profit_margin") or f.get("operating_margin")
     if margin is not None:
-        pct = margin * 100 if abs(margin) < 1 else margin
+        pct = _pct(margin)  # yfinance margins are fractions
         if pct > 30:
             s, rn = 9, "Exceptional margins — high-quality business"
         elif pct > 20:
@@ -224,8 +240,8 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     # --- 6. Debt-to-Equity (lower = safer) ---
     de = f.get("debt_to_equity")
     if de is not None:
-        # yfinance reports D/E as a ratio (sometimes *100)
-        de_ratio = de / 100 if de > 10 else de
+        # yfinance reports debtToEquity as a PERCENT of the ratio → always /100
+        de_ratio = _de_ratio(de)
         if de_ratio < 0.3:
             s, rn = 9, "Very low debt — conservative balance sheet"
         elif de_ratio < 0.5:
@@ -272,7 +288,7 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     # --- 8. Return on Equity (higher = more efficient) ---
     roe = f.get("roe")
     if roe is not None:
-        pct = roe * 100 if abs(roe) < 1 else roe
+        pct = _pct(roe)  # yfinance returnOnEquity is a fraction (1.41 == 141%)
         if pct > 30:
             s, rn = 9, "Exceptional ROE — very efficient capital use"
         elif pct > 20:
@@ -749,7 +765,7 @@ def compute_quick_score(fundamentals=None, technicals=None, tradingview=None):
 
     rev_g = f.get("revenue_growth")
     if rev_g is not None:
-        pct = rev_g * 100 if abs(rev_g) < 5 else rev_g
+        pct = _pct(rev_g)  # yfinance revenueGrowth is a fraction
         s = max(1, min(10, 5 + pct / 5))
         fund_scores.append(round(s, 1))
     else:
@@ -757,7 +773,7 @@ def compute_quick_score(fundamentals=None, technicals=None, tradingview=None):
 
     margin = f.get("profit_margin")
     if margin is not None:
-        pct = margin * 100 if abs(margin) < 1 else margin
+        pct = _pct(margin)  # yfinance margins are fractions
         s = max(1, min(9, 4 + pct / 5))
         fund_scores.append(round(s, 1))
     else:

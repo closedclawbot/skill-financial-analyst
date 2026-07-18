@@ -48,20 +48,20 @@ Zajednički koren više bugova je **yfinance dvosmislenost "frakcija vs procenat
 
 | # | Skripta | Ozb. | Bug | Uticaj |
 |---|---------|:----:|-----|--------|
-| 1 | `scoring.py` | 🔴 | ROE `×100 if abs(roe)<1` greši za ROE>100% | AAPL: 4/10 umesto 9/10 — **POTVRĐENO** |
-| 2 | `scoring.py` | 🔴 | D/E `if de>10` greši za nisko-zadužene firme | D/E 0.08 → 2/10 "ekstremno zadužen" — **POTVRĐENO** |
-| 3 | `technical_analysis.py` | 🔴 | MACD signal/histogram zamenjeni (pandas-ta grana) | `macd_bullish` skoro uvek pogrešan |
-| 4 | `run_deep_dive.py` | 🔴 | Price fallback lanac šupalj — samo yfinance daje upotrebljiv oblik | Nema tehnike kad yfinance padne |
-| 5 | `macro_calendar.py` | 🔴 | Finnhub kalendar mrtav (`api_keys` vs `apis`) | Makro događaji samo hardkodovani, zastareli posle 2026. |
+| 1 | `scoring.py` | 🔴 | ROE `×100 if abs(roe)<1` greši za ROE>100% | AAPL/NVDA: 4/10 umesto 9/10 — **✅ ISPRAVLJENO** |
+| 2 | `scoring.py` | 🔴 | D/E `if de>10` greši za nisko-zadužene firme | NVDA D/E 6.5 → 2/10 "ekstremno zadužen" — **✅ ISPRAVLJENO** |
+| 3 | `technical_analysis.py` | 🟡 | MACD signal/histogram zamenjeni (positional `cols[1]`/`cols[2]`); `macd_bullish` ≡ `signal>0` umesto `line>signal` | Pogrešan crossover + zamenjen prikaz; ~0.19 kompozita — **✅ ISPRAVLJENO** |
+| 4 | `data_fetchers.py` | 🟡 | Price fallback šupalj — samo yfinance vraćao DataFrame; polygon/AV/FMP nekompatibilni oblici | Nema tehnike kad yfinance padne — **✅ ISPRAVLJENO** |
+| 5 | `macro_calendar.py` | 🔴 | Finnhub kalendar mrtav (`api_keys` vs `apis`); + hardkodovani datumi već približni; nema dedup/US-filter/precedence | Makro risk-flag-ovi nepouzdani, tiho degradiraju — **✅ Stage 1 ISPRAVLJENO** (Stage 2 za tačnost) |
 | 6 | `data_fetchers.py` | 🟡 | `sec_edgar_filings` 2 mrtva poziva; + izmešten iz `fundamentals` (maskirao finnhub/fmp), pravi `document_url` | Trošenje poziva / lažna atribucija — **✅ ISPRAVLJENO** |
 | 7 | `data_fetchers.py` | 🟡 | Hardkodovan UA email ignoriše config | SEC nema kontakt; UA sad iz config-a, baca ako nema — **✅ ISPRAVLJENO** |
-| 8 | `data_fetchers.py` | 🟡 | `yfinance_analyst_ratings` zastareo šema | Prazne analitičar ocene |
-| 9 | `data_fetchers.py` | 🟡 | AV rate-limit detekcija zastarela (`Information`) | Nejasna greška na limitu |
-| 10 | `data_fetchers.py` | 🟡 | `yfinance_earnings` koristi uklonjeni `quarterly_earnings` | AttributeError u fallback grani |
+| 8 | `data_fetchers.py` | 🟡 | `yfinance_analyst_ratings` čitao zastarelu šemu (firm/grade) | Prazne analitičar ocene bez Finnhub ključa — **✅ ISPRAVLJENO** |
+| 9 | `data_fetchers.py` | 🟡 | AV rate-limit detekcija zastarela (`Information`) | Nejasna greška na limitu — **✅ ISPRAVLJENO** |
+| 10 | `data_fetchers.py` | 🟡 | `yfinance_earnings`: mrtav `quarterly_earnings` fallback (sada `None`, ne crash) + `surprisePercent` frakcija tretirana kao procenat | Scoring `surprise_avg>5` nikad ne opali; nekonzistentno sa Finnhub — **✅ ISPRAVLJENO** |
 | 11 | `entry_exit.py` | 🟡 | Sajzing = samo rizik-formula (nema capital/concentration/liquidity cap-a); izmišlja rizik na `stop>=entry`; string izlaz; pokvaren `.md` prikaz | Prikazivao poziciju od 500% računa — **✅ ISPRAVLJENO** |
 | 12 | `run_portfolio_review.py` | 🟡 | `float()` u CSV parsiranju bez try/except | Loš broj ruši ceo review — **✅ ISPRAVLJENO** |
 | 13 | `data_cache.py` | 🟡 | Formater čita drugu šemu ključeva nego producenti (tehnika, cena, R:R, insider, news, earnings, congress, dividends, TV) + `above_sma None→"Below"` (pogrešna tvrdnja) | Glavni `.md` artefakt prazan/netačan (ocene netaknute) — **✅ ISPRAVLJENO** |
-| 14 | `data_cache.py` | ⚪ | `_fmt_pct` `abs<1` heuristika mis-scale | Pogrešno prikazan dividend_yield |
+| 14 | `data_cache.py` | 🟡 | `_fmt_pct` `abs<1` heuristika mis-scale | dividend_yield/ROE/payout do 100× pogrešni u `.md` — **✅ ISPRAVLJENO** |
 | 15 | `technical_analysis.py` | ⚪ | `golden_cross`/`death_cross` su stanje, ne događaj | Duplira `above_sma`, pogrešan naziv |
 | 16 | `api_config.py` | ⚪ | `enabled` flag se ignoriše | Dokumentacija govori da se postavi, kôd ne čita |
 | 17 | `api_caller.py` | ⚪ | `time.sleep(delay)` pre svakog poziva, i prvog | Nepotrebno usporenje (AV 12s) |
@@ -102,7 +102,7 @@ Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 - 🟡 **#6a — Semantički mismatch + maskiranje:** `sec_edgar_filings` vraća listu filing-a (bez metrika), a bio registrovan pod `fundamentals` → na yfinance-padu "uspevao" i maskirao finnhub/fmp + davao lažni "✓". Uz to: nema 10-K/10-Q filtera (vraća sve forme), `primaryDocument` je samo ime fajla (ne URL). **✅ ISPRAVLJENO** (izmešten u `filings` kategoriju, dodat pravi `document_url`).
 - 🟡 **#7 — Hardkodovan User-Agent** ignoriše config `user_agent_email`. SEC traži stvaran kontakt. **✅ ISPRAVLJENO** — UA se čita iz config-a (+env), baca `ValueError` ako nije podešen (bez placeholder-a); SEC je fallback pa `call_with_fallback` samo pređe dalje.
 - 🔴 **NOVI nalaz (sibling #4): fundamentals fallback je nemapiran.** Samo `yfinance_fundamentals` emituje ključeve koje scoring čita; `finnhub_financials` (`{metrics}`) i `fmp_fundamentals` (`{profile}`) koriste svoje šeme → na yfinance-padu scoring dobija neutralne vrednosti bez obzira koji fallback "uspe". Ide uz #4 (normalizacija) — **zaseban visoko-prioritetan zadatak.**
-- 🟡 **#8 — `yfinance_analyst_ratings` čita zastareo šema.** Traži `Firm`/`To Grade`/`Action`, ali moderni yfinance `.recommendations` vraća `[period, strongBuy, buy, hold, sell, strongSell]`. Rezultat: sva polja prazna.
+- 🟡 **#8 — `yfinance_analyst_ratings` čita zastareo šema.** Traži `Firm`/`To Grade`/`Action`, ali moderni yfinance `.recommendations` vraća `[period, strongBuy, buy, hold, sell, strongSell]`. Rezultat: sva polja prazna. **✅ ISPRAVLJENO** (vidi Status ispravki).
 - ⚪ **`sec_insider_trades` je pogrešno imenovan** — funkcija se zove "sec" ali zove Finnhub API.
 - 🟡 **#9 — Alpha Vantage rate-limit detekcija zastarela.** AV sada vraća poruku pod ključem `"Information"`, a kôd gleda `"Note"`/`"Error Message"` → greška je nejasna ("Unknown"). Isto u `alpha_vantage_price_history` i `alpha_vantage_news_sentiment`.
 - 🟡 **StockTwits API (`api.stocktwits.com/api/2`)** je danas uglavnom zaključan (403/429) → social_sentiment često pada iako je "bez ključa".
@@ -117,7 +117,7 @@ Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 
 ### `data_cache.py` — keš (.md + .json po tikeru/danu)
 Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFrame-ova, robusna serijalizacija (pandas/numpy). Ali:
-- ⚪ **#14 — `_fmt_pct` heuristika `if abs(pct) < 1: pct *= 100` je opasna.** Za yfinance dividend_yield (posle promene 2024. čas frakcija 0.005, čas procenat 0.5) pogrešno skalira — 0.9% postane 90%.
+- 🟡 **#14 — `_fmt_pct` heuristika `if abs(pct) < 1: pct *= 100` je opasna.** Mis-scale u OBA smera: već-procenat `dividendYield` (AAPL 0.32 → 32%) i vrednosti ≥1 (ROE 1.14 → 1.14%, payout 1.5 → 1.5%). **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
 - 🟡 **#13 — Neslaganje ključeva fetcher/motor ↔ formater** (vidi [Status ispravki](#status-ispravki)). **✅ ISPRAVLJENO.**
 
 ---
@@ -125,7 +125,7 @@ Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFra
 ## Sloj 3 — Analitički motori
 
 ### `technical_analysis.py` — lokalni TA motor (pandas-ta + ručni fallback)
-- 🔴 **#3 — MACD signal i histogram su ZAMENJENI kad se koristi `pandas-ta`.** `ta.macd()` vraća kolone redom `[MACD, MACDh (histogram), MACDs (signal)]`, ali kôd dodeljuje `cols[1]→macd_signal` i `cols[2]→macd_histogram`. Znači `macd_signal` zapravo drži histogram (mali broj oko nule). Posledica: `macd_bullish = macd_line > macd_signal` upoređuje liniju sa histogramom → signal skoro uvek pogrešan. **Ručni fallback (bez pandas-ta) je ISPRAVAN** — bug se javlja baš kad korisnik instalira pandas-ta. Utiče na tehnički faktor #3.
+- 🟡 **#3 — MACD signal i histogram su ZAMENJENI kad se koristi `pandas-ta`.** `ta.macd()` vraća kolone `[MACD, MACDh (histogram), MACDs (signal)]`, ali kôd je dodeljivao `cols[1]→macd_signal`, `cols[2]→macd_histogram`. Posledica: `macd_bullish = line > macd_signal(=hist)` ≡ **`signal > 0`** umesto `line > signal` (crossover) → promašuje bearish-iznad-nule i bullish-ispod-nule. Ručni fallback je ISPRAVAN u dodeljivanju. Potvrđeno empirijski + iz instaliranog pandas-ta izvora + Codex CLI review. **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
 - ⚪ **#15 — `golden_cross`/`death_cross` nisu "krstovi" nego trenutno stanje** (`sma_50 > sma_200`). Pravi zlatni krst je *presek* (skorašnji događaj). Ovako su samo negacija jedno drugog i dupliraju `above_sma`.
 - ⚪ EMA koristi `adjust=True` (pandas default) umesto `adjust=False` → MACD se blago razlikuje od standardnog/TradingView.
 - ⚪ Ručni RSI koristi prosto klizni prosek umesto Wilder smoothing-a → razlikuje se od pandas-ta RSI.
@@ -162,8 +162,7 @@ Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFra
 ## Sloj 4 — Kontekstni moduli
 
 ### `macro_calendar.py` — earnings + ekonomski događaji + risk flags
-- 🔴 **#5 — Finnhub kalendar je mrtav kôd.** `key = config.get("api_keys", {}).get("finnhub")`. Ali `load_config()` vraća `{"apis": {"finnhub": {"api_key": ...}}}` — ne postoji ključ `"api_keys"`. Zato je `key` **uvek None** → `_fetch_finnhub_calendar` uvek vraća praznu listu. Trebalo bi `get_api_key("finnhub")`.
-- 🟡 **Hardkodovani datumi idu samo do kraja 2026.** Pošto je Finnhub grana mrtva, posle 2026. nema više nijednog makro događaja. Neki CPI/Jobs datumi su procene.
+- 🔴 **#5 — Finnhub kalendar je bio mrtav kôd** (`config.get("api_keys")` umesto `get_api_key("finnhub")`) → uvek prazno. **Dublje (iz adversarijalne revizije):** hardkodovani datumi su **već približni** (kôd sam kaže *"approximate"* za CPI), endpoint je **premium** (free tier → 403), i nedostajali su dedup, US filter i precedence. **✅ Stage 1 ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki). **Stage 2** (live BLS/Fed izvori za tačnost datuma) ostaje obavezan nastavak.
 - ⚪ `earnings_dates` fallback poredi tz-aware indeks sa naivnim `datetime.now()` → TypeError koji se guta u `except` (primarni `calendar` put obično radi).
 
 ### `sector_rotation.py` — 11 sektorskih ETF-ova vs SPY
@@ -175,7 +174,7 @@ Najčistiji modul — batch download, relativna snaga po 1W/1M/3M, kompozit (0.4
 ## Sloj 5 — Workflow orkestratori
 
 ### `run_deep_dive.py` — Use Case 3 (flagship)
-- 🔴 **#4 — Fallback lanac za cenu je praktično kozmetički.** `compute_technicals` traži `price_data["data"]` kao pandas DataFrame — a to vraća **samo yfinance**. Polygon vraća `results` (lista), Alpha Vantage `time_series` (dict), FMP `data` (lista). Ako yfinance padne (429) i cenu posluži fallback → `price_df` je None/lista → TA pukne → `technicals=None`. Cela "otporna" priča za `price_history` je šuplja nizvodno. (Ne ruši se — tech_score padne na 5.0, entry/exit koristi grubi 2%-ATR — ali je degradirano.)
+- 🟡 **#4 — Fallback lanac za cenu je bio kozmetički** — `compute_technicals` traži `price_data["data"]` kao DataFrame, a to je vraćao samo yfinance (polygon `results` lista, AV `time_series` dict, FMP `data` lista). Na yfinance-padu → `technicals=None`, tech_score 5.0, entry/exit grubi 2%-ATR. **✅ ISPRAVLJENO** — svi price fetcher-i sada vraćaju kanonski OHLCV DataFrame pod `"data"`. Vidi [Status ispravki](#status-ispravki). (Severity 🔴→🟡 per Codex: cena/current_price su preživljavali, degradirala se samo tehnika.)
 - 🟡 **#13 — Neslaganje šeme ključeva u keširanom `.md`** (širi nego prvobitno procenjeno). `save_cache` dobija sirov fetcher/motor dict, a `_format_markdown` čita drugu šemu → prazno/N/A u tehnici (RSI/MACD/ATR/BB/S-R/Fibonacci), price zaglavlju, R:R (čitan sa pogrešnog mesta), insider, news, earnings, congress, dividends, TV oscilatorima. Dodatno `above_sma None→"Below"` je *pogrešna tvrdnja*, ne samo izostavljena. **Ocene NISU pogođene** (scoring/entry-exit čitaju sirov dict direktno). **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
 - ⚪ `_estimate_title_sentiment` koristi substring poklapanje → "miss" u "commission", "cut" u "prosecuted" → lažni bearish signali.
 - ⚪ Mrtav kôd: `words = set(title.lower().split())` se izračuna a ne koristi; `_fmt_pct`/`_fmt_dollars` definisani a nigde pozvani.
@@ -244,17 +243,19 @@ Od najmanjeg (najniži rizik, najmanji zahvat) ka najvećem:
 2. ~~**`data_cache.py`** — uskladiti ključeve fetcher/motor↔formater (#13) 🟡~~ **✅ URAĐENO**
 3. ~~**`data_fetchers.py`** — ukloniti bespotrebne SEC pozive + koristiti config email + izmestiti u `filings` (#6, #7, #6a) 🟡~~ **✅ URAĐENO (opcija b)**
 4. ~~**`entry_exit.py`** — cap sajzinga na kupovnu moć + ADV (#11) 🟡~~ **✅ URAĐENO** (float ostaje za #18)
-5. **`macro_calendar.py`** — `get_api_key("finnhub")` umesto `config.get("api_keys")` (#5) 🔴
-6. **`technical_analysis.py`** — ispraviti redosled MACD kolona (#3) 🔴
-7. **`run_deep_dive.py`** — normalizovati sve price fetcher-e u zajednički DataFrame (#4) 🔴
-8. **`scoring.py`** — uvek `de/100` za Debt-to-Equity (#2) 🔴
-9. **`scoring.py`** — ispraviti ROE skaliranje (#1) 🔴
+5. ~~**`macro_calendar.py`** — `get_api_key` + precedence/coverage/observability (#5, Stage 1) 🔴~~ **✅ URAĐENO** (Stage 2 = live izvori, zaseban zadatak)
+6. ~~**`technical_analysis.py`** — MACD kolone po imenu + validacija (#3) 🟡~~ **✅ URAĐENO** (fallback EMA/RSI accuracy = zaseban TA-task)
+7. ~~**`data_fetchers.py`** — normalizovati sve price fetcher-e u zajednički DataFrame (#4) 🟡~~ **✅ URAĐENO**
+8. ~~**`scoring.py`** — uvek `de/100` za Debt-to-Equity (#2) 🔴~~ **✅ URAĐENO**
+9. ~~**`scoring.py`** — ispraviti ROE skaliranje (#1) 🔴~~ **✅ URAĐENO**
 
 Paralelno / kao zasebne crte:
 - **#18 (free float + short interest)** — likvidnosne/squeeze metrike + sajzing na % float/ADV.
 - **Fundamental-enrichment** (zaseban zadatak, *odvojen* od #18) — dohvatiti valuation polja koja formater prikazuje ali `yfinance_fundamentals` ne dohvata: `enterpriseToEbitda`, `pegRatio`, `currentRatio`, `totalCash`, `totalDebt`, `forwardEps`. Sve postoji u yfinance `.info`.
 - **Fundamentals fallback normalizacija** (sibling #4, visok prioritet) — mapirati `finnhub_financials` (`{metrics}`) i `fmp_fundamentals` (`{profile}`) na scoring šemu (`pe_ratio`, `revenue_growth`, `roe`...), da fallback posle yfinance-pada zaista hrani scoring, a ne neutralne vrednosti.
 - **Ožičavanje `filings` kategorije** (odloženi deo opcije (a) iz #6a) — dodati fetch+prikaz filing-a u `run_deep_dive`, `is_api_available("sec_edgar") → NEEDS CONTACT` kad email nije podešen. Do tada je `filings` definisan ali nepozvan.
+- **Macro calendar Stage 2** (obavezan nastavak #5 — Stage 1 ne popravlja netačne fallback datume) — live zvanični izvori redom: BLS ICS (CPI/Employment, sa cache + fixture test), Fed FOMC parser (last-known-good cache), holiday-aware OPEX generator, BEA GDP/PCE. FRED preskočiti dok ne zatreba.
+- **TA-accuracy** (zaseban zadatak, iz #3 revizije) — uskladiti ručni fallback EMA sa pandas-ta (`presma`/SMA-seed + `talib=False`, warm-up semantika) i ručni RSI na Wilder smoothing umesto rolling mean. Bez toga fallback grana (bez pandas-ta) daje blago nestandardne vrednosti.
 - **IB/L2 integracija** — veća nadogradnja (novi `ibkr` fetcher, `market_depth` kategorija, auto-import portfolija).
 
 ---
@@ -330,6 +331,119 @@ Izmenjeni fajlovi: `scripts/data_fetchers.py` (+`_sec_user_agent`/`_sec_ticker_m
 **Verifikacija:** `tests/test_position_sizing.py` — **31/31 PASS**: capital-limited (500%→100%), risk-limited, concentration-limited, `stop>=entry`→`None` (ne capital-only), jedinice (`0.25` OK / `25`→`ValueError`), tie→oba u `binding`, ADV metrika samo uz konačan pozitivan ADV, `portfolio_pct` nikad > 100%×leverage. Regresije #12/#13/#6-7 sve prolaze.
 
 Izmenjeni fajlovi: `scripts/entry_exit.py` (rewrite `_compute_position_sizes` + `_size_one`, params na `compute_entry_exit`), `scripts/data_cache.py` (prikaz), `tests/test_position_sizing.py` (nov).
+
+### ✅ Bug #5 — Macro calendar Stage 1: containment + observability + Finnhub correctness (2026-07-18)
+
+**Podela (dogovorena adversarijalno):** Stage 1 = *containment/observability/Finnhub correctness*; **ne** tvrdi da rešava tačnost free kalendara — to je Stage 2 (live izvori). Ključni uvid: dijagnoza (hardkodovani datumi već pogrešni) je *free-path* problem; ispravka ključa pomaže samo *paid* korisnicima.
+
+**Stage 1 (urađeno):**
+- **Ključ:** `get_api_key("finnhub", config)` umesto `config.get("api_keys")`; docstring jasno kaže da je Economic Calendar **premium**.
+- **`_fetch_finnhub_calendar` → strukturiran rezultat** (`attempted/success/http_status/error_class/coverage_*`), ne bare lista — razlikuje "pokriveno, nema događaja" od auth/premium/rate-limit/network.
+- **impact mapiranje** (`low/medium/high` + numeričko), **US country filter**, **HTTP klasifikacija** (401 auth / 403 premium / 429 rate_limit / 5xx provider).
+- **Source-level precedence PRE exact dedup** — uspešan Finnhub pokriva makro (FOMC/CPI/JOBS) → **potiskuje** približne fallback događaje tih kategorija (revidiran live CPI zamenjuje pogrešan fallback, ne oba); **OPEX** ostaje iz fallback-a (Finnhub ga ne prati).
+- **Coverage semantika:** eksplicitni `coverage_start/end` po izvoru (ne `max(event.date)`); warning kad `coverage_end < cutoff` (pokrivenost celog prozora, ne "posle poslednjeg datuma").
+- **Hardkodovani događaji programski označeni** `source="hardcoded_fallback"`, `date_confidence="APPROXIMATE"` (odvojeno od `impact`); risk-flag kaže *"approximate fallback date; live calendar unavailable"*.
+- **Observability:** jedna soft napomena po summary-ju na neuspeh (klasifikovan); `format` razlikuje *"coverage is complete"* od *"INCOMPLETE"*. `success + prazna lista = pokriveno` (≠ 403/network).
+
+**Ne rađeno (svesno):** ručno "krpljenje" hardkodovanih datuma (pravi novu stale listu); tačnost dolazi iz Stage 2 live izvora.
+
+**Verifikacija:** `tests/test_macro_calendar.py` — **28/28 PASS**, uključujući **kritični test** (live CPI revidiran datum + fallback drugi datum → samo live CPI ostaje, fallback CPI potisnut, OPEX zadržan). Sve regresije (#12/#13/#6-7/#11) prolaze.
+
+Izmenjeni fajlovi: `scripts/macro_calendar.py` (helperi + rewrite `_fetch_finnhub_calendar`/`get_economic_events`/`get_macro_summary`/`format_macro_summary`), `tests/test_macro_calendar.py` (nov).
+
+### ✅ Bug #3 — MACD signal/histogram swap (2026-07-18)
+
+**Potvrda (tri sloja):** empirijski (`.venv` pandas-ta 0.4.71b0: kolone `MACD, MACDh, MACDs`; kôd čita `cols[1]`=histogram kao signal, `cols[2]`=signal kao histogram); iz **instaliranog izvora** (`pandas_ta/momentum/macd.py` dodaje `macd, histogram, signalma` tim redom; `ema.py` `presma=True`/TA-Lib); i **Codex CLI** review (CONFIRM ×5, "FIX PLAN: SOUND").
+
+**Rešenje:**
+- **Selekcija kolona po IMENU** (token `MACD`/`MACDh`/`MACDs`), ne po poziciji; **validacija** da su sve tri prisutne — na schema drift **ne** mapira tiho nego prijavi warning + postavi tri polja na `None`.
+- **Ručna fallback grana netaknuta** — `ewm(adjust=False)` ne reprodukuje pandas-ta SMA-seeded/TA-Lib EMA, pa poravnanje grana i RSI Wilder idu u zaseban **TA-accuracy** zadatak.
+- Severity **🔴→🟡**: MACD je 1 od 8 ravnopravnih tehničkih faktora; najgori swing faktora (3↔8) menja tech-score ~0.625, kompozit ~0.19 (30% težine). Kvari crossover i prikaz, ali sam ne dominira kompozitom.
+
+**Verifikacija:** `tests/test_macd.py` — **12/12 PASS**: histogram-invarijanta (tolerantno `abs_tol=2e-4` zbog `_safe_last` zaokruživanja), `macd_bullish == line>signal`, **shuffle kolona → mapiranje po imenu drži**, **crossover ispod/iznad nule** (slučajevi koje je swap grešio), i missing-column → `None` bez rušenja. Sve regresije (#12/#13/#6-7/#11/#5) prolaze.
+
+Izmenjeni fajlovi: `scripts/technical_analysis.py` (MACD blok), `tests/test_macd.py` (nov).
+
+### ✅ Bugovi #1 / #2 — ROE / Debt-to-Equity jedinice (2026-07-18)
+
+**Osnova — živa yfinance mapa jedinica** (povučeno iz `.info`: AAPL/NVDA/KO/O/JPM/MNST): rate/margin/growth polja su **frakcije** (`0.27`=27%); `debtToEquity` je **procenat odnosa** (`79.5`=0.795x); `dividendYield` je **već procenat** (`0.32`=0.32%).
+
+**Smoking gun (živi):** `NVDA debtToEquity=6.555` → stari `de/100 if de>10` → `6.555>10` False → ostaje 6.555 → **2/10 "extremely leveraged"**; stvarni odnos je 0.066 (skoro bez duga). `NVDA returnOnEquity=1.14` → stari `abs<1` False → čita 1.14% → 4/10. Bug pogađa prave, istaknute firme.
+
+**Rešenje:** eksplicitni konverteri bez heuristika — `_pct(frac)=frac*100` (ROE, revenueGrowth, earningsGrowth, profit/operating margins) i `_de_ratio(de)=de/100` (debtToEquity). **Behavior-preserving** za normalne firme (KO ROE 0.43→43, AAPL D/E 79.5→0.795 nepromenjeno); menja se samo mis-scored ivica (ROE≥100%, D/E reported ≤10, growth-frakcija ≥5).
+
+**Obim (odvojeno):** `dividendYield` je suprotan slučaj (već procenat, NE ×100) → to je **#14** u display sloju (`data_cache._fmt_pct`), zaseban. Finnhub/FMP fundamentals koriste svoje jedinice i nisu normalizovani → **fundamentals-fallback normalizacija** zaseban zadatak; scoring u praksi vidi samo yfinance šemu, pa je fix na yfinance konvenciju ispravan.
+
+**Codex CLI review** (log: `docs/codex-review/01-02-fundamental-units.md`): A/B/C sve CONFIRM; preporuka — dokumentovati/testirati granicu "važi dok scoring dobija yfinance šemu" (uneto u komentar helpera + testove).
+
+**Verifikacija:** `tests/test_fundamental_units.py` — **18/18 PASS** sa stvarnim yfinance vrednostima (NVDA/AAPL/KO/MNST): edge fix + očuvanje ponašanja. Sve regresije prolaze.
+
+Izmenjeni fajlovi: `scripts/scoring.py` (`_pct`/`_de_ratio` + 7 polja u `_score_fundamental`/`compute_quick_score`), `tests/test_fundamental_units.py` (nov).
+
+### ✅ Bug #4 — Price fallback: kanonski OHLCV DataFrame (2026-07-18)
+
+**Problem:** samo `yfinance` je vraćao `"data"` kao DataFrame; `polygon` (`results` lista), `alpha_vantage` (`time_series` dict), `fmp` (`data` lista) — nekompatibilni oblici. Na yfinance-padu `price_data.get("data")` je None/lista → `compute_technicals` pukne → `technicals=None` (tech_score 5.0, entry/exit 2%-ATR). "Otporni" lanac je bio kozmetički za tehniku.
+
+**Rešenje:** svi price fetcher-i vraćaju **kanonski OHLCV DataFrame** pod `"data"` (`Open/High/Low/Close/Volume`, rastući `DatetimeIndex`) preko `_rows_to_ohlcv` (numeric coerce, dropna OHLC, `Volume.fillna(0)`, sort ascending, dedup datuma, **raise ako <2 reda** da fallback nastavi) + `_price_result` (`latest_close/volume` iz df-a). polygon `t`=epoch-ms; AV prefiksni string ključevi (+ dodato `Information` u rate-limit detekciju → delom rešava #9); FMP newest-first (sort ispravlja). yfinance netaknut. Nijedan drugi kôd nije konzumirao stare raw payload-e.
+
+**Severity 🔴→🟡** (Codex): cena/current_price su preživljavali, degradirala se samo tehnika. AV `compact`=100 redova → SMA200 nedostupan na AV fallback-u (dokumentovana degradacija).
+
+**Codex CLI review** (log: `docs/codex-review/04-price-fallback.md`, kroz fajl u 2 iteracije): CONFIRM pravca + dorade (severity, raw-payload, robustnost, gotchas), pa finalni **`SOUND`** (pozvan u pozadini da ne blokira).
+
+**Verifikacija:** `tests/test_price_normalization.py` — **19/19 PASS**: svaki provajder → kanonski DataFrame, rastući indeks, `latest_close`=najnoviji, `compute_technicals` radi, garbage payload baca (fallback nastavlja). Sve regresije prolaze.
+
+Izmenjeni fajlovi: `scripts/data_fetchers.py` (`_rows_to_ohlcv`/`_price_result` + polygon/AV/FMP), `tests/test_price_normalization.py` (nov).
+
+### ✅ Bug #8 — yfinance analyst ratings zastarela šema (2026-07-18)
+
+**Osnova — živa yfinance šema:** `.recommendations` je sada **agregirani brojevi** (kolone `period/strongBuy/buy/hold/sell/strongSell`, red `0m` = tekući); stari firm/grade/action prešli u `.upgrades_downgrades`. Stari fetcher (`.iloc[-1].get("Firm")`) → sve prazno + `total=rowcount` = smeće. Fallback za `analyst_ratings` posle finnhub → korisnici bez Finnhub ključa dobijali praznu analitičar ocenu.
+
+**Rešenje:** vraća **istu count-šemu kao finnhub** (`buy/hold/sell/strong_buy/strong_sell/period/num_analysts`) → scoring radi, prikaz konzistentan. `_format_analyst_line` (yfinance grana) sada prikazuje brojeve. Update `data_sources`… n/a.
+
+**Codex CLI review** (log: `docs/codex-review/08-*.md`, po AGENTS.md protokolu, `--sandbox read-only`): **CHANGES_REQUIRED → prihvaćeno → AGREED**. Dorade: (1) `0m` red se bira **eksplicitno** (`recs["period"].eq("0m")`, raise ako nije tačno jedan), ne `iloc[0]`; (2) counts-only; (3) 🟡; robusna koercija (`pd.to_numeric(coerce)`, **raise** na missing/negativno/ne-celobrojno — bez tihe nule da se schema break ne sakrije); sačuvan `period`.
+
+**Verifikacija:** `tests/test_analyst_ratings.py` — **16/16 PASS** (`0m` nije prvi red, numpy brojevi, NaN/negativno/ne-celobrojno/nula → raise, schema break, formater). Sve regresije prolaze.
+
+Izmenjeni fajlovi: `scripts/data_fetchers.py` (`yfinance_analyst_ratings`), `scripts/run_deep_dive.py` (`_format_analyst_line`), `tests/test_analyst_ratings.py` (nov), `tests/test_enhanced_report.py` (postojeći analyst-line test ažuriran na count-šemu — regres uhvaćen punim regresionim prolazom tokom #9 review-a).
+
+### ✅ Bug #9 — Alpha Vantage rate-limit detekcija (2026-07-18)
+
+**Problem:** AV vraća HTTP 200 i kad je throttlovan, sa razlogom u telu. Trenutni daily-limit je pod ključem **`Information`**; `alpha_vantage_price_history` je to već hvatao (#4), ali `alpha_vantage_news_sentiment` nije → na limitu prijavljivao `"Unknown"` (i pozivalac nije mogao da razlikuje "rate-limited" od "nema podataka").
+
+**Rešenje:** zajednički helper `_av_error(data)` (prioritet `Information` > `Note` > `Error Message`), korišćen u oba AV fetcher-a.
+
+**Codex CLI review** (log: `docs/codex-review/09-av-rate-limit.md`, `--sandbox read-only`): kôd sound; **CHANGES_REQUIRED → AGREED** — Codex je (po protokolu) tražio pun regresioni prolaz, koji je **uhvatio regres iz #8** (`test_enhanced_report` analyst-line test na staroj firm/grade šemi), sada ispravljen.
+
+**Verifikacija:** `tests/test_av_error.py` — **9/9 PASS**; pun regresioni prolaz zelen.
+
+Izmenjeni fajlovi: `scripts/data_fetchers.py` (`_av_error` + oba AV fetcher-a), `tests/test_av_error.py` (nov).
+
+### ✅ Bug #10 — yfinance earnings šema + surprise jedinica (2026-07-18)
+
+**Dva nalaza (živa yfinance šema):** (1) `.quarterly_earnings` sada vraća **`None`** (deprecation, ne AttributeError) → fallback grana mrtva ali bezbedna → uklonjena. (2) **Novo:** `.earnings_history` `surprisePercent` je **frakcija** (`0.0346` = 3.46%); stari kôd ga je prosleđivao kao procenat → `surprise_avg ≈ 0.03` → scoring `surprise_avg > 5` **nikad ne opali**, i nekonzistentno sa `finnhub_earnings` (koji daje procenat).
+
+**Rešenje:** surprise% se **računa iz actual/estimate** (`(a-e)/abs(e)*100`, procenat, konzistentno sa Finnhub-om i scoring pragom), sa `pd.to_numeric`/`pd.notna` zaštitom (NaN/None/0 estimate → `None`, bez deljenja nulom). Uklonjen `quarterly_earnings` fallback. Čuvaju se čisti float/None.
+
+**Codex CLI review** (log: `docs/codex-review/10-*.md`, `--sandbox read-only`): runda 1 **CLARIFY** (read-only sandbox blokirao Codex-ovo čitanje repo-a → dao inventar konzumenata inline), runda 2 **AGREED** — svi konzumenti `surprise_avg` očekuju procenat; nijedan ne traži frakciju. Pre-postojeći per-kvartal display key-mismatch (`surprise_pct` vs `surprisePercent`) ostaje zasebno skopiran (#13-class).
+
+**Verifikacija:** `tests/test_yf_earnings.py` — **12/12 PASS** (procenat skala, beat/miss, numpy dtypes, NaN/0/None → `None`, empty → ValueError, `quarterly_earnings` se ne dira); pun regresioni prolaz zelen.
+
+Izmenjeni fajlovi: `scripts/data_fetchers.py` (`yfinance_earnings`), `tests/test_yf_earnings.py` (nov).
+
+### ✅ Bug #14 — `_fmt_pct` mis-scale + moderni yfinance jedinice/šema kontrakt (2026-07-18)
+
+**Problem:** display helper `_fmt_pct` je pogađao jedinice po magnitudi (`if abs(pct)<1: pct*=100`) → mis-scale u **oba** smera na glavnom `.md`: već-procenat `dividendYield` (AAPL 0.32 → prikazano **32%**), i vrednosti ≥1 koje nisu skalirane (ROE 1.14288 → **1.14%**, payout 1.5 → **1.5%**). Isti frakcija/procenat problem kao #1/#2, samo u prikaznom sloju.
+
+**Rešenje (Codex-AGREED opcija A — eksplicitan kontrakt, bez heuristike):**
+- `_fmt_pct(frac)` → **uvek** `frac*100` (svaki caller je frakcija: revenueGrowth/earningsGrowth/profit-operating margins/ROE/ROA/payoutRatio). Novi `_fmt_pct_value(val)` → već-procenat, **neskalirano**, samo za `dividend_yield`. (Split je bio implementiran pre dogovora; zadržan.)
+- **`requirements.txt`** floor podignut `yfinance>=0.2.36` → **`yfinance>=1.5.1`** — kôd ionako *već* hard-zahteva modernu šemu (#8 `.recommendations` agregat baca bez `period`; #10 konzumira `.earnings_history`), pa je stari floor lažno opisivao granicu kompatibilnosti. Value-based detekcija odbačena (2.6% je `0.026` frakcija ili `2.6` procenat — opsezi se preklapaju).
+- **`data_fetchers.py`** — dodat "yfinance schema/units contract (producer boundary)" note u module docstring: agregirane recommendations, `.earnings_history`, `.info` rate/margin/growth/ROE/payout su FRAKCIJE, `dividendYield` je VEĆ PROCENAT; nizvodni `_fmt_pct` (×100) vs `_fmt_pct_value` (neskalirano) oslonac; stare verzije nepodržane.
+
+**Codex CLI review** (log: `docs/codex-review/14-fmt-pct-units.md`, 5 poruka): runda 1 CHANGES_REQUIRED (verzija-kontrakt gap: `>=0.2.36` dozvoljava stari fraction-`dividendYield` install), runda 2 posle dokaza da je stari yfinance već slomljen drugde → **AGREED** na opciju A. Severity **⚪→🟡** (odluka-relevantni report brojevi do 100× pogrešni, ali bez uticaja na scoring-putanju).
+
+**Verifikacija:** `tests/test_fmt_pct.py` — **11/11 PASS** (`_fmt_pct` fraction/high-ROE/payout>1/negative/None; `_fmt_pct_value` 2.6→2.60%, 0.32→0.32%; dividends integracija 2.60% + payout 64.80%, nema 260% mis-scale). Pun regresioni prolaz — **14/14 fajlova zeleno** (analyst_ratings 16, av_error 9, csv_parsing 22, enhanced_report 11, fmt_pct 11, fundamental_units 18, macd 12, macro_calendar 28, markdown_formatter 23, position_sizing 31, price_normalization 19, sec_edgar 14, yf_earnings 12, skill 21/24+3 skip), nula padova.
+
+Izmenjeni fajlovi: `requirements.txt`, `scripts/data_fetchers.py` (module-docstring kontrakt), `tests/test_fmt_pct.py` (label). `scripts/data_cache.py` (`_fmt_pct`/`_fmt_pct_value` split) — landiran ranije.
 
 ---
 

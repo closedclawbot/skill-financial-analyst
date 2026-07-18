@@ -73,16 +73,30 @@ def compute_technicals(df, ticker=""):
         result["rsi_14"] = _compute_rsi(close, 14)
 
     # ── MACD ─────────────────────────────────────────────────────
+    # Select columns BY NAME, not position: pandas-ta orders them
+    # MACD (line), MACDh (histogram), MACDs (signal). Positional indexing
+    # (cols[1]/cols[2]) silently swapped signal↔histogram.
     if HAS_PANDAS_TA:
         macd_df = ta.macd(close, fast=12, slow=26, signal=9)
         if macd_df is not None and not macd_df.empty:
-            cols = macd_df.columns
-            result["macd_line"] = _safe_last(macd_df[cols[0]])
-            result["macd_signal"] = _safe_last(macd_df[cols[1]])
-            result["macd_histogram"] = _safe_last(macd_df[cols[2]])
+            by_token = {str(c).split("_", 1)[0]: c for c in macd_df.columns}
+            missing = {"MACD", "MACDh", "MACDs"} - by_token.keys()
+            if missing:
+                # Surface schema drift instead of silently mis-mapping.
+                print(f"  ⚠ Unexpected pandas-ta MACD columns {list(macd_df.columns)} "
+                      f"(missing {sorted(missing)}) — MACD skipped")
+                result["macd_line"] = result["macd_signal"] = result["macd_histogram"] = None
+            else:
+                result["macd_line"] = _safe_last(macd_df[by_token["MACD"]])
+                result["macd_histogram"] = _safe_last(macd_df[by_token["MACDh"]])
+                result["macd_signal"] = _safe_last(macd_df[by_token["MACDs"]])
         else:
             result["macd_line"] = result["macd_signal"] = result["macd_histogram"] = None
     else:
+        # Manual fallback (pandas-ta absent). Assigns signal/histogram correctly
+        # (all bug #3 concerns). NOTE: this uses pandas' default adjust=True EMA
+        # and does NOT match pandas-ta's SMA-seeded EMA — the fallback's
+        # numerical accuracy is a SEPARATE TA-accuracy task, not this fix.
         ema12 = close.ewm(span=12).mean()
         ema26 = close.ewm(span=26).mean()
         macd_line = ema12 - ema26

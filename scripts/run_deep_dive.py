@@ -62,20 +62,16 @@ def _format_analyst_line(source_id, raw_data):
             return f"{buy} Buy, {hold} Hold, {sell} Sell ({buy/total*100:.0f}% buy)"
         return "No analyst data"
 
-    # ── yfinance: {ticker, firm, grade, action, total_recommendations} ──
+    # ── yfinance: now aggregated counts (same shape as finnhub) ──
     if source_id == "yfinance":
-        firm = raw_data.get("firm", "").strip() or "Unknown firm"
-        grade = raw_data.get("grade", "").strip() or raw_data.get("To Grade", "")
-        action = raw_data.get("action", "").strip()
-        total = raw_data.get("total_recommendations", 0)
-        parts = [f"Latest: {firm}"]
-        if grade:
-            parts.append(f"→ {grade}")
-        if action:
-            parts.append(f"({action})")
-        if total:
-            parts.append(f"| {total} total recs")
-        return " ".join(parts)
+        buy = raw_data.get("buy", 0) + raw_data.get("strong_buy", 0)
+        hold = raw_data.get("hold", 0)
+        sell = raw_data.get("sell", 0) + raw_data.get("strong_sell", 0)
+        total = buy + hold + sell
+        if total > 0:
+            period = raw_data.get("period", "0m")
+            return f"{buy} Buy, {hold} Hold, {sell} Sell ({buy/total*100:.0f}% buy, {period})"
+        return "No analyst data"
 
     # ── Seeking Alpha: {ticker, ratings: {data: [{attributes: {ratings: {...}}}]}} ──
     if source_id == "seeking_alpha_rapidapi":

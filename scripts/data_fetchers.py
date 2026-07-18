@@ -11,6 +11,18 @@ Usage:
     result = call_with_fallback("price_history", {
         api_id: (lambda t=ticker: fn(t)) for api_id, fn in FETCHERS["price_history"].items()
     })
+
+yfinance schema/units contract (producer boundary):
+    The yfinance_* fetchers below assume a MODERN yfinance schema and unit
+    convention, matching the pinned floor in requirements.txt (yfinance>=1.5.1):
+      • `.recommendations` is aggregated counts (period/strongBuy/buy/...) — #8
+      • `.earnings_history` exists; `.quarterly_earnings` is gone — #10
+      • rate/margin/growth/ROE/payoutRatio in `.info` are FRACTIONS (0.27 = 27%)
+      • `dividendYield` in `.info` is ALREADY A PERCENT (0.32 = 0.32%, 2.6 = 2.6%)
+    Downstream formatters rely on this: data_cache._fmt_pct scales fractions ×100,
+    _fmt_pct_value leaves the already-percent dividendYield unscaled (#14). Older
+    yfinance releases (fraction dividendYield, legacy recommendation/earnings
+    schemas) are NOT supported — the code already raises on them elsewhere.
 """
 import os, sys, json
 from datetime import datetime, timedelta
@@ -26,6 +38,56 @@ from scripts.api_config import get_api_key, API_REGISTRY
 # ═══════════════════════════════════════════════════════════════════
 #  PRICE HISTORY
 # ═══════════════════════════════════════════════════════════════════
+
+# All price fetchers return a CANONICAL OHLCV DataFrame under "data" so the
+# fallback chain is actually resilient — compute_technicals() works whichever
+# provider served the request (bug #4). Column contract: Open/High/Low/Close/
+# Volume with an ascending DatetimeIndex.
+_OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
+
+
+def _rows_to_ohlcv(rows):
+    """(dt, o, h, l, c, v) tuples → canonical OHLCV DataFrame.
+
+    Coerces numerics, drops rows missing a date or any OHLC, fills null volume
+    with 0, sorts ascending, de-dups dates. Raises if too little survives so
+    call_with_fallback() marks the provider failed and moves on.
+    """
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=["_dt"] + _OHLCV_COLS)
+    df["_dt"] = pd.to_datetime(df["_dt"], errors="coerce")
+    for c in _OHLCV_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["_dt", "Open", "High", "Low", "Close"])
+    df["Volume"] = df["Volume"].fillna(0)
+    df = df.set_index("_dt").sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    if len(df) < 2:
+        raise ValueError("insufficient OHLCV rows after normalization")
+    return df[_OHLCV_COLS]
+
+
+def _price_result(ticker, df, period, interval, source):
+    """Standard price dict — canonical DataFrame under 'data', like yfinance."""
+    return {
+        "ticker": ticker, "period": period, "interval": interval, "source": source,
+        "data": df,
+        "latest_close": float(df["Close"].iloc[-1]),
+        "latest_volume": int(df["Volume"].iloc[-1]),
+        "records": len(df),
+    }
+
+
+def _av_error(data):
+    """Alpha Vantage returns HTTP 200 even on rate-limit / bad symbol, with the
+    reason under one of these keys. `Information` is the current daily-limit
+    message; `Note` the older throttle; `Error Message` a bad request. Returns
+    the message, or None if none is present."""
+    for k in ("Information", "Note", "Error Message"):
+        if data.get(k):
+            return data[k]
+    return None
+
 
 def yfinance_price_history(ticker, period="1y", interval="1d"):
     """Get OHLCV price history from yfinance."""
@@ -62,10 +124,12 @@ def polygon_price_history(ticker, days=365):
     data = r.json()
     if data.get("resultsCount", 0) == 0:
         raise ValueError(f"No Polygon data for {ticker}")
-    bars = data["results"]
-    latest_close = float(bars[-1]["c"])  # Polygon uses "c" for close
-    return {"ticker": ticker, "results": bars, "records": data["resultsCount"],
-            "latest_close": latest_close, "latest_volume": int(bars[-1].get("v", 0))}
+    import pandas as pd
+    # Polygon: t is epoch-MILLIS; o/h/l/c/v.
+    rows = [(pd.to_datetime(b.get("t"), unit="ms"), b.get("o"), b.get("h"),
+             b.get("l"), b.get("c"), b.get("v"))
+            for b in data["results"] if b.get("t") is not None]
+    return _price_result(ticker, _rows_to_ohlcv(rows), f"{days}d", "1d", "polygon")
 
 
 def alpha_vantage_price_history(ticker):
@@ -82,12 +146,12 @@ def alpha_vantage_price_history(ticker):
     r.raise_for_status()
     data = r.json()
     if "Time Series (Daily)" not in data:
-        raise ValueError(f"AV error: {data.get('Note', data.get('Error Message', 'Unknown'))}")
+        raise ValueError(f"AV error: {_av_error(data) or 'no data returned'}")
     ts = data["Time Series (Daily)"]
-    latest_date = sorted(ts.keys())[-1]
-    latest_close = float(ts[latest_date]["4. close"])
-    return {"ticker": ticker, "time_series": ts,
-            "latest_close": latest_close}
+    # AV keys are prefixed ("1. open" ... "5. volume") and values are strings.
+    rows = [(d, v.get("1. open"), v.get("2. high"), v.get("3. low"),
+             v.get("4. close"), v.get("5. volume")) for d, v in ts.items()]
+    return _price_result(ticker, _rows_to_ohlcv(rows), "compact-100d", "1d", "alpha_vantage")
 
 
 def fmp_price_history(ticker):
@@ -104,14 +168,12 @@ def fmp_price_history(ticker):
     data = r.json()
     if not data:
         raise ValueError(f"No FMP price data for {ticker}")
-    # FMP returns a list of dicts sorted newest first, each with "close"
-    if isinstance(data, list) and len(data) > 0:
-        latest_close = float(data[0].get("close", data[0].get("adjClose", 0)))
-    elif isinstance(data, dict):
-        latest_close = float(data.get("close", data.get("adjClose", 0)))
-    else:
-        latest_close = 0
-    return {"ticker": ticker, "data": data, "latest_close": latest_close}
+    # FMP returns a list of dicts, newest-first (sort in _rows_to_ohlcv fixes order).
+    records = data if isinstance(data, list) else [data]
+    rows = [(rec.get("date"), rec.get("open"), rec.get("high"), rec.get("low"),
+             rec.get("close", rec.get("adjClose")), rec.get("volume"))
+            for rec in records if isinstance(rec, dict)]
+    return _price_result(ticker, _rows_to_ohlcv(rows), "full", "1d", "fmp")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -426,19 +488,45 @@ def finnhub_analyst_ratings(ticker):
 
 
 def yfinance_analyst_ratings(ticker):
-    """Get analyst recommendations from yfinance."""
+    """Get analyst recommendation counts from yfinance's current ('0m') bucket.
+
+    Modern yfinance `.recommendations` is AGGREGATED COUNTS with columns
+    period/strongBuy/buy/hold/sell/strongSell (the old firm/grade/action moved to
+    `.upgrades_downgrades`). Returns the same count shape as finnhub_analyst_ratings
+    so scoring + display are consistent. Fails clearly on a schema break rather
+    than silently mapping bad values to zero.
+    """
     import yfinance as yf
+    import pandas as pd
     t = yf.Ticker(ticker)
     recs = t.recommendations
-    if recs is None or recs.empty:
+    if recs is None or getattr(recs, "empty", True):
         raise ValueError(f"No yfinance recommendations for {ticker}")
-    latest = recs.iloc[-1]
+    if "period" not in getattr(recs, "columns", []):
+        raise ValueError(f"Unexpected yfinance recommendations schema: {list(getattr(recs, 'columns', []))}")
+    # Select the current bucket explicitly — do NOT assume row order.
+    cur = recs.loc[recs["period"].astype(str) == "0m"]
+    if len(cur) != 1:
+        raise ValueError(f"yfinance recommendations: expected one '0m' row, got {len(cur)}")
+    row = cur.iloc[0]
+
+    def _count(col):
+        v = pd.to_numeric(row.get(col), errors="coerce")
+        if pd.isna(v) or v < 0 or float(v) != int(v):
+            raise ValueError(f"yfinance recommendations: bad {col}={row.get(col)!r}")
+        return int(v)
+
+    sb, b, h, s, ss = (_count("strongBuy"), _count("buy"), _count("hold"),
+                       _count("sell"), _count("strongSell"))
+    total = sb + b + h + s + ss
+    if total == 0:
+        raise ValueError(f"No analyst recommendations for {ticker}")
     return {
         "ticker": ticker,
-        "firm": latest.get("Firm", ""),
-        "grade": latest.get("To Grade", latest.get("toGrade", "")),
-        "action": latest.get("Action", latest.get("action", "")),
-        "total_recommendations": len(recs),
+        "buy": b, "hold": h, "sell": s,
+        "strong_buy": sb, "strong_sell": ss,
+        "period": str(row.get("period", "0m")),
+        "num_analysts": total,
     }
 
 
@@ -565,7 +653,7 @@ def alpha_vantage_news_sentiment(ticker):
     r.raise_for_status()
     data = r.json()
     if "feed" not in data:
-        raise ValueError(f"AV news error: {data.get('Note', data.get('Error Message', 'Unknown'))}")
+        raise ValueError(f"AV news error: {_av_error(data) or 'no feed returned'}")
     feed = data["feed"]
     # Extract per-ticker sentiment from each article
     sentiments = []
@@ -667,40 +755,35 @@ def finnhub_earnings(ticker):
 
 
 def yfinance_earnings(ticker):
-    """Get earnings data from yfinance (fallback for Finnhub)."""
+    """Get earnings history from yfinance (fallback for Finnhub).
+
+    Modern yfinance exposes `.earnings_history` (columns epsActual / epsEstimate /
+    epsDifference / surprisePercent); `.quarterly_earnings` was removed (now
+    returns None), so that fallback is gone. NOTE: yfinance's `surprisePercent`
+    is a FRACTION (0.0346 = 3.46%), so we compute the surprise % ourselves from
+    actual/estimate — consistent with Finnhub (which returns a percent) and with
+    the scoring threshold (`surprise_avg > 5`).
+    """
     import yfinance as yf
+    import pandas as pd
     t = yf.Ticker(ticker)
-    earnings = t.earnings_history
-    if earnings is None or (hasattr(earnings, 'empty') and earnings.empty):
-        # Try quarterly earnings instead
-        qe = t.quarterly_earnings
-        if qe is None or (hasattr(qe, 'empty') and qe.empty):
-            raise ValueError(f"No yfinance earnings data for {ticker}")
-        # Convert quarterly earnings to standard format
-        records = []
-        for idx, row in qe.iterrows():
-            actual = row.get("Earnings", row.get("Revenue", 0))
-            estimate = row.get("Estimate", 0)
-            surprise = ((actual - estimate) / abs(estimate) * 100) if estimate else 0
-            records.append({"period": str(idx), "actual": actual, "estimate": estimate, "surprisePercent": surprise})
-        surprises = [r["surprisePercent"] for r in records if r["surprisePercent"] != 0]
-        return {
-            "ticker": ticker,
-            "earnings": records[:8],
-            "surprise_avg": sum(surprises) / len(surprises) if surprises else 0,
-            "beat_count": sum(1 for s in surprises if s > 0),
-            "miss_count": sum(1 for s in surprises if s < 0),
-        }
-    # earnings_history is a DataFrame with epsActual, epsEstimate, epsDifference, surprisePercent
+    eh = t.earnings_history
+    if eh is None or getattr(eh, "empty", True):
+        raise ValueError(f"No yfinance earnings data for {ticker}")
     records = []
-    for idx, row in earnings.iterrows():
+    for idx, row in eh.iterrows():
+        # Coerce robustly: pandas turns a missing estimate into NaN, not None.
+        a = pd.to_numeric(row.get("epsActual"), errors="coerce")
+        e = pd.to_numeric(row.get("epsEstimate"), errors="coerce")
+        surprise_pct = (float((a - e) / abs(e) * 100)
+                        if (pd.notna(a) and pd.notna(e) and e != 0) else None)
         records.append({
             "period": str(idx),
-            "actual": row.get("epsActual"),
-            "estimate": row.get("epsEstimate"),
-            "surprisePercent": row.get("surprisePercent", 0),
+            "actual": float(a) if pd.notna(a) else None,
+            "estimate": float(e) if pd.notna(e) else None,
+            "surprisePercent": surprise_pct,   # percent, consistent with Finnhub
         })
-    surprises = [r["surprisePercent"] for r in records if r.get("surprisePercent") is not None and r["surprisePercent"] != 0]
+    surprises = [r["surprisePercent"] for r in records if r["surprisePercent"] is not None]
     return {
         "ticker": ticker,
         "earnings": records[:8],
