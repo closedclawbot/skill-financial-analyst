@@ -58,7 +58,7 @@ Zajednički koren više bugova je **yfinance dvosmislenost "frakcija vs procenat
 | 8 | `data_fetchers.py` | 🟡 | `yfinance_analyst_ratings` zastareo šema | Prazne analitičar ocene |
 | 9 | `data_fetchers.py` | 🟡 | AV rate-limit detekcija zastarela (`Information`) | Nejasna greška na limitu |
 | 10 | `data_fetchers.py` | 🟡 | `yfinance_earnings` koristi uklonjeni `quarterly_earnings` | AttributeError u fallback grani |
-| 11 | `entry_exit.py` | 🟡 | Sajzing ignoriše kupovnu moć i float | Može prikazati poziciju od 500% računa |
+| 11 | `entry_exit.py` | 🟡 | Sajzing = samo rizik-formula (nema capital/concentration/liquidity cap-a); izmišlja rizik na `stop>=entry`; string izlaz; pokvaren `.md` prikaz | Prikazivao poziciju od 500% računa — **✅ ISPRAVLJENO** |
 | 12 | `run_portfolio_review.py` | 🟡 | `float()` u CSV parsiranju bez try/except | Loš broj ruši ceo review — **✅ ISPRAVLJENO** |
 | 13 | `data_cache.py` | 🟡 | Formater čita drugu šemu ključeva nego producenti (tehnika, cena, R:R, insider, news, earnings, congress, dividends, TV) + `above_sma None→"Below"` (pogrešna tvrdnja) | Glavni `.md` artefakt prazan/netačan (ocene netaknute) — **✅ ISPRAVLJENO** |
 | 14 | `data_cache.py` | ⚪ | `_fmt_pct` `abs<1` heuristika mis-scale | Pogrešno prikazan dividend_yield |
@@ -152,7 +152,7 @@ Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFra
 - ✅ Dobro: `compute_quick_score` sa preraspodelom težina kad izvor nedostaje (ne vuče ka ravnih 5.0). Clamp 0-10, sektor modifikator ±0.5 — korektno.
 
 ### `entry_exit.py` — 3 ulaza / 3 izlaza / stop / R:R / sajzing
-- 🟡 **#11 — Sajzing pozicije ignoriše kupovnu moć (i float).** `shares = int(max_loss / risk_per_share)` bez ograničenja na `account/entry`. Za skupu akciju sa malim rizikom po akciji, trošak može biti npr. 500% računa, a izveštaj mirno pokaže `pct_of_portfolio: 500%` bez upozorenja. Treba capovati na raspoloživi kapital (i idealno na % float-a / ADV-a).
+- 🟡 **#11 — Sajzing pozicije ignoriše kupovnu moć (i likvidnost).** `shares = int(max_loss / risk_per_share)` bez ograničenja na kapital → prikazivao poziciju od 500% računa bez upozorenja. **✅ ISPRAVLJENO** — `min(risk, capital, [concentration], [liquidity])`; capital cap (1× default) ubija 500%; ADV metrika iz `volume_avg_20`; `stop>=entry` više ne izmišlja rizik nego poništava sizing. Float ostaje za #18. Vidi [Status ispravki](#status-ispravki).
 - ⚪ **Redosled operacija u računanju ulaza** (linije 171–173): `e_cons` se računa iz starog `e_mod`, pa se onda `e_mod` menja. Finalni `sorted(reverse=True)` garantuje opadajući redosled, ali ne i nameravan razmak/oznake (moderate/conservative se mogu zameniti).
 - ⚪ **8% cap na stop se tiho gazi** pravilom "bar 1 ATR ispod conservative" — za volatilne akcije stvarni stop prelazi deklarisanih 8%.
 - ✅ Dobro: zaštita od deljenja nulom u R:R, cap na 20x, `favorable = 2.0 ≤ rr ≤ 15.0`.
@@ -243,7 +243,7 @@ Od najmanjeg (najniži rizik, najmanji zahvat) ka najvećem:
 1. ~~**`run_portfolio_review.py`** — CSV `float()` u try/except (#12) 🟡~~ **✅ URAĐENO**
 2. ~~**`data_cache.py`** — uskladiti ključeve fetcher/motor↔formater (#13) 🟡~~ **✅ URAĐENO**
 3. ~~**`data_fetchers.py`** — ukloniti bespotrebne SEC pozive + koristiti config email + izmestiti u `filings` (#6, #7, #6a) 🟡~~ **✅ URAĐENO (opcija b)**
-4. **`entry_exit.py`** — cap sajzinga na kupovnu moć + % float/ADV (#11, spaja se sa #18) 🟡
+4. ~~**`entry_exit.py`** — cap sajzinga na kupovnu moć + ADV (#11) 🟡~~ **✅ URAĐENO** (float ostaje za #18)
 5. **`macro_calendar.py`** — `get_api_key("finnhub")` umesto `config.get("api_keys")` (#5) 🔴
 6. **`technical_analysis.py`** — ispraviti redosled MACD kolona (#3) 🔴
 7. **`run_deep_dive.py`** — normalizovati sve price fetcher-e u zajednički DataFrame (#4) 🔴
@@ -313,6 +313,23 @@ Izmenjeni fajlovi: `scripts/data_cache.py` (+4 adaptera/helpera, ~10 sekcija for
 **Verifikacija:** `tests/test_sec_edgar.py` — **14/14 PASS** (mock, bez mreže): 2-poziva-umesto-4 + keširanje, UA nosi konfigurisan email, missing/`null` email → `ValueError` bez HTTP poziva, `document_url` konstrukcija, i registarsko ožičenje (`sec_edgar` van `fundamentals`, u `filings`). Regresije #12 (22/22) i #13 (23/23) prolaze.
 
 Izmenjeni fajlovi: `scripts/data_fetchers.py` (+`_sec_user_agent`/`_sec_ticker_map`, rewrite `sec_edgar_filings`, `get_fetchers`), `scripts/api_config.py` (`FALLBACK_CHAINS`), `tests/test_sec_edgar.py` (nov).
+
+### ✅ Bug #11 — Position sizing: multi-constraint model (2026-07-18)
+
+**Rešenje:** `_compute_position_sizes` prepravljen sa čiste rizik-formule na **`min(risk, capital, [concentration], [liquidity])`** po ilustrativnom scenariju računa.
+- **capital cap** (`floor(account × leverage_multiplier / entry)`, `leverage_multiplier=1.0` default = cash, uvek ON) → **ubija 500% bug**.
+- **risk** i **capital** su MANDATORY: ako se rizik ne može proceniti (`stop >= entry`), sizing te ćelije se **poništava** (`shares=None`, `sizing_evaluated=False`, warning) umesto ranije izmišljene `entry*0.02` rizik-vrednosti.
+- **concentration** (`max_position_fraction`, OFF po defaultu) i **liquidity** (`max_adv_participation_fraction`, hard cap samo ako je zadat) su OPCIONI. ADV = `technicals["volume_avg_20"]` (već lokalno).
+- **`position_pct_of_adv`** računa se iz **konačnih** (post-cap) akcija; `adv_metrics_evaluated=False` ako ADV nedostaje.
+- **Jedinice pinovane** (istorija fraction/percent bugova #1/#2/#14): `max_position_fraction`/`max_adv_participation_fraction` su **frakcije (0,1]** (25 → `ValueError`); `risk_pct` ostaje procenat radi legacy kompatibilnosti, odmah normalizovan. Izlaz `*_pct` = ljudski procenti.
+- Izlaz su **brojevi** (ne stringovi): `shares, notional, portfolio_pct, risk_budget, planned_loss_at_stop, binding_constraints, constraints{shares,evaluated}, position_pct_of_adv`.
+- **`data_cache` prikaz** popravljen (dvonivojska `{entry:{account:leaf}}` struktura + oznaka o ilustrativnom scenariju) — usput rešen i deo #13.
+
+**Dizajn-odluke (iz adversarijalne revizije):** capital cap ≠ „buying power" (nema veze sa brokerom) → naziv/oznaka „illustrative standalone scenario"; nema univerzalnog ADV/concentration default-a (Flash Crash logika) → OFF/not_evaluated osim ako je konfigurisano; `stop` ne garantuje `max_loss` → `planned_loss_at_stop`. Float odložen za ceo #18 (float% sam je slab signal). Naziv multiplier-a `leverage_multiplier` (jasnije od `gross_exposure`, koji je portfolio-nivo termin).
+
+**Verifikacija:** `tests/test_position_sizing.py` — **31/31 PASS**: capital-limited (500%→100%), risk-limited, concentration-limited, `stop>=entry`→`None` (ne capital-only), jedinice (`0.25` OK / `25`→`ValueError`), tie→oba u `binding`, ADV metrika samo uz konačan pozitivan ADV, `portfolio_pct` nikad > 100%×leverage. Regresije #12/#13/#6-7 sve prolaze.
+
+Izmenjeni fajlovi: `scripts/entry_exit.py` (rewrite `_compute_position_sizes` + `_size_one`, params na `compute_entry_exit`), `scripts/data_cache.py` (prikaz), `tests/test_position_sizing.py` (nov).
 
 ---
 

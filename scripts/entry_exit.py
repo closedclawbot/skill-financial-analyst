@@ -28,14 +28,16 @@ Usage:
         score=7.2,           # composite score
     )
 """
-import os, sys
+import os, sys, math
 
 _project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 
-def compute_entry_exit(current_price, technicals=None, score=5.0, risk_pct=2.0):
+def compute_entry_exit(current_price, technicals=None, score=5.0, risk_pct=2.0,
+                       leverage_multiplier=1.0, max_position_fraction=None,
+                       max_adv_participation_fraction=None):
     """
     Compute 3 entry levels, 3 exit targets, and stop loss.
 
@@ -76,7 +78,13 @@ def compute_entry_exit(current_price, technicals=None, score=5.0, risk_pct=2.0):
     risk_reward = _compute_risk_reward(entries, targets, stop_loss)
 
     # ─── POSITION SIZING ─────────────────────────────────────────
-    position_sizes = _compute_position_sizes(entries, stop_loss, risk_pct)
+    position_sizes = _compute_position_sizes(
+        entries, stop_loss, risk_pct,
+        avg_volume=ta.get("volume_avg_20"),
+        leverage_multiplier=leverage_multiplier,
+        max_position_fraction=max_position_fraction,
+        max_adv_participation_fraction=max_adv_participation_fraction,
+    )
 
     return {
         "current_price": current_price,
@@ -308,39 +316,132 @@ def _compute_risk_reward(entries, targets, stop_loss):
 
 # ─── POSITION SIZING ───────────────────────────────────────────
 
-def _compute_position_sizes(entries, stop_loss, risk_pct=2.0):
-    """
-    Suggest position sizes based on risk percentage.
+_SIZING_NOTE = ("Illustrative standalone-account scenario — existing holdings, "
+                "open orders and available cash are NOT considered.")
 
-    For a $10,000 account risking 2%:
-    - Max loss = $200
-    - If risk per share = entry - stop = $5
-    - Position size = 200 / 5 = 40 shares
 
-    Returns shares per $10K, $50K, $100K account sizes.
+def _compute_position_sizes(entries, stop_loss, risk_pct=2.0, avg_volume=None,
+                            leverage_multiplier=1.0, max_position_fraction=None,
+                            max_adv_participation_fraction=None,
+                            account_sizes=(10_000, 50_000, 100_000)):
     """
+    Suggest position sizes as ``min`` of several constraints, per illustrative
+    account scenario. NOT a portfolio-aware sizer (see _SIZING_NOTE).
+
+    Units — pinned explicitly to avoid the fraction/percent trap:
+      - ``risk_pct``: PERCENT points (legacy API), 2.0 == 2%.
+      - ``max_position_fraction`` / ``max_adv_participation_fraction``: FRACTIONS
+        in (0, 1]  (0.25 == 25%). Passing 25 raises ValueError.
+      - ``leverage_multiplier``: 1.0 == cash (no leverage). Margin only if the
+        caller explicitly passes > 1.
+    Output ``*_pct`` fields are human percents (25.0, 0.4).
+
+    Constraints:
+      - risk, capital  → MANDATORY. If either can't be evaluated (e.g. a
+        long-position stop that is not below entry), sizing for that
+        entry/account is invalidated (shares=None) rather than emitting a
+        capital-only number that looks authoritative.
+      - concentration, liquidity → OPTIONAL (off unless configured).
+    """
+    if not (isinstance(risk_pct, (int, float)) and risk_pct > 0 and math.isfinite(risk_pct)):
+        raise ValueError("risk_pct must be a positive number (percent points, e.g. 2.0)")
+    if not (isinstance(leverage_multiplier, (int, float)) and leverage_multiplier > 0
+            and math.isfinite(leverage_multiplier)):
+        raise ValueError("leverage_multiplier must be > 0 (1.0 = cash)")
+    if max_position_fraction is not None and not (0 < max_position_fraction <= 1.0):
+        raise ValueError("max_position_fraction must be a FRACTION in (0, 1] (0.25 for 25%), not a percent")
+    if max_adv_participation_fraction is not None and not (0 < max_adv_participation_fraction <= 1.0):
+        raise ValueError("max_adv_participation_fraction must be a FRACTION in (0, 1]")
+
+    risk_fraction = risk_pct / 100.0
+    adv = avg_volume if (isinstance(avg_volume, (int, float)) and math.isfinite(avg_volume)
+                         and avg_volume > 0) else None
+
     entry_names = ["aggressive", "moderate", "conservative"]
-    account_sizes = [10_000, 50_000, 100_000]
     sizes = {}
-
     for e_name, entry in zip(entry_names, entries):
-        risk_per_share = entry - stop_loss
-        if risk_per_share <= 0:
-            risk_per_share = entry * 0.02  # fallback: 2% of entry
         entry_sizes = {}
         for acct in account_sizes:
-            max_loss = acct * (risk_pct / 100)
-            shares = int(max_loss / risk_per_share)
-            dollar_amount = round(shares * entry, 2)
-            pct_of_portfolio = round(dollar_amount / acct * 100, 1)
-            entry_sizes[f"${acct:,}"] = {
-                "shares": shares,
-                "cost": f"${dollar_amount:,.2f}",
-                "pct_of_portfolio": f"{pct_of_portfolio}%",
-            }
+            entry_sizes[f"${acct:,}"] = _size_one(
+                entry, stop_loss, acct, risk_fraction, adv,
+                leverage_multiplier, max_position_fraction, max_adv_participation_fraction)
         sizes[e_name] = entry_sizes
-
     return sizes
+
+
+def _size_one(entry, stop_loss, account, risk_fraction, adv,
+              leverage_multiplier, max_position_fraction, max_adv_participation_fraction):
+    """Size a single (entry, account) cell. Returns the rich leaf dict."""
+    constraints = {}
+    warnings = []
+    risk_budget = round(account * risk_fraction, 2)
+
+    # ── risk (MANDATORY) ──
+    risk_per_share = entry - stop_loss
+    if risk_per_share > 0:
+        constraints["risk"] = {"shares": int(risk_budget / risk_per_share), "evaluated": True}
+    else:
+        constraints["risk"] = {"shares": None, "evaluated": False}
+        warnings.append("Stop must be below entry for long-position sizing.")
+
+    # ── capital (MANDATORY) ──
+    if entry > 0:
+        constraints["capital"] = {"shares": int(account * leverage_multiplier / entry), "evaluated": True}
+    else:
+        constraints["capital"] = {"shares": None, "evaluated": False}
+        warnings.append("Entry price must be positive.")
+
+    # ── concentration (OPTIONAL) ──
+    if max_position_fraction is not None and entry > 0:
+        constraints["concentration"] = {"shares": int(account * max_position_fraction / entry), "evaluated": True}
+    else:
+        constraints["concentration"] = {"shares": None, "evaluated": False}
+
+    # ── liquidity (OPTIONAL — hard cap only if a participation fraction is set) ──
+    if max_adv_participation_fraction is not None and adv is not None:
+        constraints["liquidity"] = {"shares": int(max_adv_participation_fraction * adv), "evaluated": True}
+    else:
+        constraints["liquidity"] = {"shares": None, "evaluated": False}
+
+    base = {
+        "constraints": constraints,
+        "risk_budget": risk_budget,
+        "warnings": warnings,
+        "note": _SIZING_NOTE,
+    }
+
+    # A mandatory constraint that couldn't be evaluated invalidates the cell.
+    if not (constraints["risk"]["evaluated"] and constraints["capital"]["evaluated"]):
+        return {**base, "shares": None, "sizing_evaluated": False, "binding_constraints": [],
+                "notional": None, "portfolio_pct": None, "planned_loss_at_stop": None,
+                "position_pct_of_adv": None, "adv_metrics_evaluated": False}
+
+    evaluated = {k: v["shares"] for k, v in constraints.items()
+                 if v["evaluated"] and v["shares"] is not None}
+    final_shares = min(evaluated.values())
+    binding = sorted(k for k, s in evaluated.items() if s == final_shares)
+
+    if final_shares <= 0:
+        warnings.append("Insufficient capital for one whole share.")
+
+    notional = round(final_shares * entry, 2)
+    # ADV participation is computed from the FINAL (post-cap) share count.
+    if adv is not None:
+        position_pct_of_adv, adv_eval = round(final_shares / adv * 100, 4), True
+    else:
+        position_pct_of_adv, adv_eval = None, False
+
+    return {
+        **base,
+        "shares": final_shares,
+        "sizing_evaluated": True,
+        "binding_constraints": binding,
+        "notional": notional,
+        "portfolio_pct": round(notional / account * 100, 1) if account else None,
+        "planned_loss_at_stop": round(final_shares * risk_per_share, 2),
+        "position_pct_of_adv": position_pct_of_adv,
+        "adv_metrics_evaluated": adv_eval,
+    }
 
 
 # ─── HELPERS ────────────────────────────────────────────────────

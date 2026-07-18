@@ -736,14 +736,37 @@ def _format_markdown(ticker, day, data, config_status=None):
                        f"stop ${combo.get('stop', 0):.2f})")
 
             sizing = ee.get("position_sizes")
-            if sizing:
+            if isinstance(sizing, dict) and sizing:
                 _h(f"")
                 _h(f"### Position Sizing")
-                for acct, info in sizing.items():
-                    if isinstance(info, dict):
-                        _h(f"- {acct}: {info.get('shares', 'N/A')} shares (${info.get('cost', 0):,.0f})")
-                    else:
-                        _h(f"- {acct}: {info}")
+                _h(f"*Illustrative standalone-account scenarios — existing holdings/cash not considered.*")
+                # Structure is {entry_name: {account: leaf}}
+                for e_name, accts in sizing.items():
+                    if not isinstance(accts, dict):
+                        continue
+                    _h(f"")
+                    _h(f"**{e_name.title()} entry**")
+                    for acct, leaf in accts.items():
+                        if not isinstance(leaf, dict):
+                            continue
+                        if not leaf.get("sizing_evaluated", True) or leaf.get("shares") is None:
+                            warn = "; ".join(leaf.get("warnings", [])) or "not evaluable"
+                            _h(f"- {acct}: — ({warn})")
+                            continue
+                        shares = leaf.get("shares", 0)
+                        notional = leaf.get("notional") or 0
+                        pct = leaf.get("portfolio_pct")
+                        binding = ", ".join(leaf.get("binding_constraints", []))
+                        line = f"- {acct}: {shares} shares (${notional:,.0f}"
+                        if pct is not None:
+                            line += f", {pct}% of acct"
+                        if binding:
+                            line += f"; limited by {binding}"
+                        line += ")"
+                        _h(line)
+                        padv = leaf.get("position_pct_of_adv")
+                        if padv is not None:
+                            _h(f"    ADV participation: {padv}%")
         _h(f"")
 
     # ─── Footer ───────────────────────────────────────────────────
