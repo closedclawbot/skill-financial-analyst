@@ -141,7 +141,12 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     # --- 2. PB Ratio (lower = better value) ---
     pb = f.get("pb_ratio")
     if pb is not None:
-        if pb < 1:
+        if pb <= 0:
+            # Price is always > 0, so priceToBook <= 0 means NEGATIVE shareholder
+            # equity (insolvency / post-merger degeneracy) — the worst signal, NOT
+            # "below book value". Score it at the range floor, never 9. See #19.
+            s, rn = 2, "Negative book value — negative shareholder equity (distressed / post-merger)"
+        elif pb < 1:
             s, rn = 9, "Below book value — deep value opportunity"
         elif pb < 2:
             s, rn = 7, "Reasonable — near book value"
@@ -289,7 +294,16 @@ def _score_fundamental(fundamentals, analyst=None, insider=None, earnings=None):
     roe = f.get("roe")
     if roe is not None:
         pct = _pct(roe)  # yfinance returnOnEquity is a fraction (1.41 == 141%)
-        if pct > 30:
+        pb_for_roe = f.get("pb_ratio")
+        if pb_for_roe is not None and pb_for_roe <= 0:
+            # Negative shareholder equity (see #19) makes ROE = NetIncome/Equity a
+            # denominator ARTIFACT, not efficiency — a positive ROE here can even
+            # come from two negatives. Neutralize (never reward 9), and don't
+            # double-penalize: the P/B block already scores the negative-equity
+            # state low. A legitimate buyback-driven high ROE (positive equity,
+            # e.g. AAPL ~141%) still lands 9 below. See #20.
+            s, rn = 5, "ROE unreliable — negative equity base (denominator artifact)"
+        elif pct > 30:
             s, rn = 9, "Exceptional ROE — very efficient capital use"
         elif pct > 20:
             s, rn = 8, "Strong ROE — above-average efficiency"

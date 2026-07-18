@@ -66,6 +66,11 @@ Zajednički koren više bugova je **yfinance dvosmislenost "frakcija vs procenat
 | 16 | `api_config.py` | ⚪ | `enabled` flag se ignoriše | Dokumentacija govori da se postavi, kôd ne čita |
 | 17 | `api_caller.py` | ⚪ | `time.sleep(delay)` pre svakog poziva, i prvog | Nepotrebno usporenje (AV 12s) |
 | 18 | Poprečno | 🟡 | **Free float / short interest se nigde ne koristi** | Nema likvidnosnog/squeeze signala; sajzing ne zna float |
+| 19 | `scoring.py` | 🔴 | Negativan P/B (`pb < 1`) boduje se 9/10 "deep value" | Negative-equity firma (FGMC −2075) dobija max fundamental — **✅ ISPRAVLJENO** |
+| 20 | `scoring.py` | 🟡 | ROE bez gornjeg sanity capa (`>30 → 9/10`) | 1028% (artefakt negativnog imenioca) → 9/10 — **✅ ISPRAVLJENO** |
+| 21 | `scoring.py` / `data_fetchers.py` | 🟡 | Nema SPAC / de-SPAC / insufficient-history detekcije | Fundamentals (PE/PB/ROE/margine) besmisleni za tek-spojene entitete |
+| 22 | `data_cache.py` / `scoring.py` | ⚪ | FCF `-0.00B` + margin `0.0%` uz "negative" label | Prikaz/prag ivičnih vrednosti nedosledni |
+| 23 | `run_deep_dive.py` | ⚪ | News link je Finnhub redirect (`finnhub.io/api/news?id=`), ne izvorni URL | Indirektni/ružni linkovi u KEY ARTICLES |
 
 Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 
@@ -119,6 +124,7 @@ Detaljni opisi svih (uključujući sitnije nedoslednosti) slede po slojevima.
 Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFrame-ova, robusna serijalizacija (pandas/numpy). Ali:
 - 🟡 **#14 — `_fmt_pct` heuristika `if abs(pct) < 1: pct *= 100` je opasna.** Mis-scale u OBA smera: već-procenat `dividendYield` (AAPL 0.32 → 32%) i vrednosti ≥1 (ROE 1.14 → 1.14%, payout 1.5 → 1.5%). **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
 - 🟡 **#13 — Neslaganje ključeva fetcher/motor ↔ formater** (vidi [Status ispravki](#status-ispravki)). **✅ ISPRAVLJENO.**
+- ⚪ **#22 — Formatiranje ivičnih vrednosti.** `Free Cash Flow $-0.00B` (negativno zaokruženo na −0.00B) i `Profit Margin 0.0%` uz label "Negative margins — losing money" (mali negativ zaokružen na 0.0% → prikaz i prag se ne slažu). Otkriveno na FGMC.
 
 ---
 
@@ -146,6 +152,9 @@ Najbolje napisan fajl u projektu — atomičan rename JSON-a, kompresija DataFra
   D/E ulaz 150 (=1.5) -> prikazano kao 1.5 | ocena 5/10 | 'High debt — elevated financial risk'   (OK)
   D/E ulaz 8   (=0.08) -> prikazano kao 8   | ocena 2/10 | 'Extremely leveraged'                    (BUG)
   ```
+- 🔴 **#19 — Negativan P/B se boduje kao 9/10 "deep value" (`scoring.py:144`).** `if pb < 1:` hvata i negativne vrednosti; negativan P/B znači **negativan kapital** (negative shareholder equity / insolventnost), najgori mogući signal, a boduje se kao najbolji. Otkriveno na FGMC (de-SPAC): `PB −2075.0 → 9/10`. Diže fundamental score na osnovu smeća.
+- 🟡 **#20 — ROE nema gornji sanity cap (`scoring.py:292`).** `pct > 30 → 9/10` bez granice; ROE od 1028% (FGMC) je artefakt **sićušnog/negativnog imenioca** (isti negative-equity koren kao #19), a dobija "Exceptional 9/10". Kombinovano sa #19: negative-equity entitet dobija **dva 9/10** iz iste pokvarene bilanse.
+- 🟡 **#21 — Nema detekcije SPAC / de-SPAC / nedovoljne operativne istorije.** Ceo fundamental okvir (PE/PB/margine/ROE) je za operativne firme; za tek-spojeni entitet yfinance `.info` meša staru blank-check bilansu sa novom firmom → svi racia besmisleni. Sistem nema koncept "insufficient operating history → oslони se na tehniku/tok, obori fundamental confidence". Heuristika: naziv "Merger/Acquisition Corp", skok `sharesOutstanding`, IPO/merger datum < N meseci, negativan equity.
 - ⚪ Heuristike frakcija-vs-procenat se ponavljaju svuda sa različitim pragovima (`<5`, `<1`, `>10`) — krhko; koren i dividend_yield problema.
 - ⚪ `insider` se prosleđuje `_score_fundamental` ali se tamo nikad ne koristi (mrtav parametar); insider se koristi samo u sentiment faktoru.
 - ⚪ `congress_trades` parsiranje: `isinstance(trades, list)` — ako Mboum vrati dict wrapper, tiho pada na neutralno 5.
@@ -176,6 +185,7 @@ Najčistiji modul — batch download, relativna snaga po 1W/1M/3M, kompozit (0.4
 ### `run_deep_dive.py` — Use Case 3 (flagship)
 - 🟡 **#4 — Fallback lanac za cenu je bio kozmetički** — `compute_technicals` traži `price_data["data"]` kao DataFrame, a to je vraćao samo yfinance (polygon `results` lista, AV `time_series` dict, FMP `data` lista). Na yfinance-padu → `technicals=None`, tech_score 5.0, entry/exit grubi 2%-ATR. **✅ ISPRAVLJENO** — svi price fetcher-i sada vraćaju kanonski OHLCV DataFrame pod `"data"`. Vidi [Status ispravki](#status-ispravki). (Severity 🔴→🟡 per Codex: cena/current_price su preživljavali, degradirala se samo tehnika.)
 - 🟡 **#13 — Neslaganje šeme ključeva u keširanom `.md`** (širi nego prvobitno procenjeno). `save_cache` dobija sirov fetcher/motor dict, a `_format_markdown` čita drugu šemu → prazno/N/A u tehnici (RSI/MACD/ATR/BB/S-R/Fibonacci), price zaglavlju, R:R (čitan sa pogrešnog mesta), insider, news, earnings, congress, dividends, TV oscilatorima. Dodatno `above_sma None→"Below"` je *pogrešna tvrdnja*, ne samo izostavljena. **Ocene NISU pogođene** (scoring/entry-exit čitaju sirov dict direktno). **✅ ISPRAVLJENO** — vidi [Status ispravki](#status-ispravki).
+- ⚪ **#23 — News link je Finnhub redirect, ne izvorni URL (`run_deep_dive.py:547`).** `a.get("url","")` iz Finnhub free-tier `company-news` vraća `finnhub.io/api/news?id=...` (302 redirect, radi u browseru ali nije pravi izvorni link). Nisko-prioritetno.
 - ⚪ `_estimate_title_sentiment` koristi substring poklapanje → "miss" u "commission", "cut" u "prosecuted" → lažni bearish signali.
 - ⚪ Mrtav kôd: `words = set(title.lower().split())` se izračuna a ne koristi; `_fmt_pct`/`_fmt_dollars` definisani a nigde pozvani.
 
@@ -444,6 +454,23 @@ Izmenjeni fajlovi: `scripts/data_fetchers.py` (`yfinance_earnings`), `tests/test
 **Verifikacija:** `tests/test_fmt_pct.py` — **11/11 PASS** (`_fmt_pct` fraction/high-ROE/payout>1/negative/None; `_fmt_pct_value` 2.6→2.60%, 0.32→0.32%; dividends integracija 2.60% + payout 64.80%, nema 260% mis-scale). Pun regresioni prolaz — **14/14 fajlova zeleno** (analyst_ratings 16, av_error 9, csv_parsing 22, enhanced_report 11, fmt_pct 11, fundamental_units 18, macd 12, macro_calendar 28, markdown_formatter 23, position_sizing 31, price_normalization 19, sec_edgar 14, yf_earnings 12, skill 21/24+3 skip), nula padova.
 
 Izmenjeni fajlovi: `requirements.txt`, `scripts/data_fetchers.py` (module-docstring kontrakt), `tests/test_fmt_pct.py` (label). `scripts/data_cache.py` (`_fmt_pct`/`_fmt_pct_value` split) — landiran ranije.
+
+### ✅ Bugovi #19 / #20 — Negative-equity denominator (P/B + ROE) (2026-07-18)
+
+**Otkriveno na realnom runu** `run_deep_dive.py FGMC` (FG Merger II Corp — de-SPAC, spojen sa BOXABL): negative-equity entitet dobijao **dva 9/10** iz iste pokvarene bilanse — `PB −2075 → 9/10 "deep value"` i `ROE 1028% → 9/10 "exceptional"` → fundamental veštački naduvan (4.6/10).
+
+**Koren:** cena je uvek > 0, pa `priceToBook <= 0 ⇔ shareholder equity < 0` (insolventnost / post-merger degeneracija). Isti negativan equity razbija i P/B (#19) i ROE = NetIncome/Equity (#20).
+
+**Rešenje (Codex-AGREED, jedan guard za oba):**
+- **#19 P/B** (`scoring.py`): grana `if pb <= 0: → 2, "Negative book value — negative shareholder equity (distressed / post-merger)"` PRE `pb < 1`. (`<=0` hvata i degeneričnu nulu; 2 = dno postojećeg raspona.)
+- **#20 ROE** (`scoring.py`): kad je `pb_ratio <= 0` (negativan equity) → ROE `5, "ROE unreliable — negative equity base (denominator artifact)"` (neutralno, ne 9 i ne dupla kazna). **Bez** magnitude capa i **bez** `pb=None` grananja — pozitivan-sićušan equity već daje visok P/B (kažnjen tamo), a legitiman buyback-driven ROE (AAPL ~141% uz pozitivan equity) **ostaje 9/10**.
+- `compute_quick_score` netaknut (ne koristi P/B/ROE — potvrđeno).
+
+**Codex CLI review** (log: `docs/codex-review/19-20-distressed-denominator.md`, 4 poruke): runda 1 **AGREED** sa doradama — ROE=5 neutralno (ne nisko) da se izbegne dupla kazna; bez magnitude capa da AAPL/NVDA ne stradaju; P/B=2. Sve tri Codex-ove tvrdnje nezavisno verifikovane pre prihvatanja (compute_quick_score, AAPL ROE test, aritmetika). Severity **#19 🔴, #20 🟡**.
+
+**Verifikacija:** `tests/test_distressed_denominator.py` — **15/15 PASS** (neg P/B→2, poz P/B nepromenjen, neg-equity ROE→5, AAPL poz-equity ROE→9, `pb=None`→postojeće, **aritmetika pinovana: FGMC fundamental 4.6→3.5**). Pun regresioni prolaz — **15/15 fajlova zeleno** (uklj. `fundamental_units` 18/18 gde AAPL/NVDA ROE ostaju 9), nula padova.
+
+Izmenjeni fajlovi: `scripts/scoring.py` (P/B + ROE blok u `_score_fundamental`), `tests/test_distressed_denominator.py` (nov).
 
 ---
 
