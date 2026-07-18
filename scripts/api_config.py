@@ -11,6 +11,42 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.financial-analysis/api_keys.json")
 LOGS_DIR = os.path.expanduser("~/.financial-analysis/logs")
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_project_env(path=None):
+    """Load KEY=VALUE lines from the project-root .env into os.environ.
+
+    Zero-dependency (no python-dotenv). Supports `#` comment lines, an optional
+    `export ` prefix, and single/double-quoted values. A real environment
+    variable always wins — we never override a var already set in os.environ,
+    so `.env` is a fallback, matching load_config()'s env-overlay expectation.
+    Silently no-ops if the file is absent. Keys land in os.environ, so the
+    existing key_env_var overlay (e.g. FINNHUB_API_KEY) picks them up.
+    """
+    env_path = path or os.path.join(_PROJECT_ROOT, ".env")
+    try:
+        with open(env_path) as f:
+            lines = f.readlines()
+    except (FileNotFoundError, IsADirectoryError, PermissionError):
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_project_env()
+
 # ─── API REGISTRY ────────────────────────────────────────────
 # Every API the skill uses, with tier/cost/limit metadata
 API_REGISTRY = {
